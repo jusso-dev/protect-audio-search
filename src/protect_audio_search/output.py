@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from protect_audio_search.confirm import Confirmation
 from protect_audio_search.events import DetectionEvent
 from protect_audio_search.times import format_utc, format_zoned
 
@@ -24,6 +25,7 @@ class ScanResult:
     events: tuple[DetectionEvent, ...]
     clip_paths: tuple[str | None, ...] = ()
     snapshot_paths: tuple[tuple[str, ...], ...] = ()
+    confirmations: tuple[Confirmation | None, ...] = ()
 
 
 def _aligned_media(
@@ -38,8 +40,29 @@ def _aligned_media(
     return clips, snapshots
 
 
+def _aligned_confirmations(result: ScanResult) -> tuple[Confirmation | None, ...]:
+    if not result.confirmations:
+        return tuple(None for _ in result.events)
+    if len(result.confirmations) != len(result.events):
+        raise ValueError("confirmations must match the event count")
+    return result.confirmations
+
+
+def _confirmation_payload(item: Confirmation | None) -> dict[str, object] | None:
+    if item is None:
+        return None
+    return {
+        "vehicle_present": item.vehicle_present,
+        "smoke_present": item.smoke_present,
+        "plate_text": item.plate_text,
+        "plate_confidence": item.plate_confidence,
+        "note": item.note,
+    }
+
+
 def result_payload(result: ScanResult, tz: ZoneInfo) -> dict[str, object]:
     clips, snapshots = _aligned_media(result)
+    confirmations = _aligned_confirmations(result)
     return {
         "schema_version": SCHEMA_VERSION,
         "camera": result.camera,
@@ -57,8 +80,11 @@ def result_payload(result: ScanResult, tz: ZoneInfo) -> dict[str, object]:
                 "contributing_classes": list(event.contributing_classes),
                 "clip": clip,
                 "snapshots": list(snaps),
+                "confirmation": _confirmation_payload(confirmation),
             }
-            for event, clip, snaps in zip(result.events, clips, snapshots, strict=True)
+            for event, clip, snaps, confirmation in zip(
+                result.events, clips, snapshots, confirmations, strict=True
+            )
         ],
     }
 
@@ -83,11 +109,19 @@ def write_csv(path: Path, result: ScanResult, tz: ZoneInfo) -> None:
                 "contributing_classes",
                 "clip",
                 "snapshots",
+                "vehicle_present",
+                "smoke_present",
+                "plate_text",
+                "plate_confidence",
+                "confirm_note",
             ],
         )
         writer.writeheader()
         clips, snapshots = _aligned_media(result)
-        for event, clip, snaps in zip(result.events, clips, snapshots, strict=True):
+        confirmations = _aligned_confirmations(result)
+        for event, clip, snaps, confirmation in zip(
+            result.events, clips, snapshots, confirmations, strict=True
+        ):
             writer.writerow(
                 {
                     "camera": event.camera,
@@ -99,25 +133,66 @@ def write_csv(path: Path, result: ScanResult, tz: ZoneInfo) -> None:
                     "contributing_classes": "|".join(event.contributing_classes),
                     "clip": clip or "",
                     "snapshots": "|".join(snaps),
+                    **_confirm_csv(confirmation),
                 }
             )
+
+
+def _confirm_cells(item: Confirmation | None) -> tuple[str, str, str]:
+    if item is None:
+        return "", "", ""
+    return _yes_no(item.vehicle_present), _yes_no(item.smoke_present), item.plate_text or ""
+
+
+def _confirm_csv(item: Confirmation | None) -> dict[str, str]:
+    if item is None:
+        return {
+            "vehicle_present": "",
+            "smoke_present": "",
+            "plate_text": "",
+            "plate_confidence": "",
+            "confirm_note": "",
+        }
+    score = "" if item.plate_confidence is None else f"{item.plate_confidence:.3f}"
+    return {
+        "vehicle_present": _yes_no(item.vehicle_present),
+        "smoke_present": _yes_no(item.smoke_present),
+        "plate_text": item.plate_text or "",
+        "plate_confidence": score,
+        "confirm_note": item.note,
+    }
+
+
+def _yes_no(value: bool | None) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return ""
 
 
 def render_table(result: ScanResult, tz: ZoneInfo) -> str:
     if not result.events:
         return "No events."
-    headers = ("start", "end", "class", "score", "mean", "classes")
-    rows = [
-        (
+    confirmations = _aligned_confirmations(result)
+    show_confirm = any(item is not None for item in confirmations)
+    headers = ["start", "end", "class", "score", "mean", "classes"]
+    if show_confirm:
+        headers.extend(["vehicle", "smoke", "plate"])
+    rows: list[list[str]] = []
+    for event, confirmation in zip(result.events, confirmations, strict=True):
+        row = [
             format_zoned(event.start, tz),
             format_zoned(event.end, tz),
             event.peak_class,
             f"{event.peak_score:.3f}",
             f"{event.mean_score:.3f}",
             ", ".join(event.contributing_classes),
-        )
-        for event in result.events
-    ]
+        ]
+        if show_confirm:
+            vehicle, smoke, plate = _confirm_cells(confirmation)
+            row.extend([vehicle, smoke, plate])
+        rows.append(row)
     widths = [
         max(len(headers[index]), *(len(row[index]) for row in rows))
         for index in range(len(headers))
