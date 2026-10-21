@@ -16,10 +16,13 @@ from protect_audio_search.classifier import (
     WINDOW_SAMPLES,
     ClassMap,
     FrameScore,
+    ModelCacheError,
     ModelHashError,
     TFLiteYAMNet,
     UnknownClassError,
     classify,
+    default_cache_dir,
+    ensure_assets,
     load_classifier,
     verify_sha256,
 )
@@ -70,11 +73,9 @@ def test_hash_mismatch_aborts(tmp_path: Path) -> None:
 
 
 @pytest.fixture(scope="module")
-def loaded(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> tuple[TFLiteYAMNet, ClassMap, tuple[str, ...]]:
-    cache = tmp_path_factory.mktemp("yamnet")
-    return load_classifier(cache)
+def loaded() -> tuple[TFLiteYAMNet, ClassMap, tuple[str, ...]]:
+    """Use the shared cache so a warm cache needs no download."""
+    return load_classifier(default_cache_dir())
 
 
 def test_fixture_top_class_is_a_target(
@@ -103,6 +104,17 @@ def test_cached_hash_mismatch_aborts_before_use(
     with pytest.raises(ModelHashError, match="was not used"):
         load_classifier(cache)
     assert bad.read_bytes() == b"corrupt"
+
+
+def test_offline_mode_does_not_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PROTECT_AUDIO_SEARCH_OFFLINE", "1")
+
+    def refuse_network(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("offline mode must not download")
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse_network)
+    with pytest.raises(ModelCacheError, match="disables downloads"):
+        ensure_assets(tmp_path)
 
 
 def test_class_map_rows_match_model(

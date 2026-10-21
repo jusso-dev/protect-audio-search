@@ -60,6 +60,10 @@ class ModelHashError(Exception):
     """A downloaded or cached model file does not match its pinned SHA-256."""
 
 
+class ModelCacheError(Exception):
+    """A model file is missing and downloads are turned off."""
+
+
 class UnknownClassError(Exception):
     """A configured class name is not in the YAMNet class map."""
 
@@ -211,6 +215,11 @@ def _ensure_file(path: Path, url: str, expected: str) -> None:
     if path.exists():
         verify_sha256(path, expected)
         return
+    if os.environ.get("PROTECT_AUDIO_SEARCH_OFFLINE") == "1":
+        raise ModelCacheError(
+            f"{path.name} is not in the cache at {path.parent}, "
+            "and PROTECT_AUDIO_SEARCH_OFFLINE=1 disables downloads."
+        )
     temporary = path.with_suffix(path.suffix + ".partial")
     request = urllib.request.Request(url, headers={"User-Agent": "protect-audio-search"})
     try:
