@@ -129,6 +129,12 @@ def test_class_threshold_flag_parses() -> None:
     args = parser.parse_args(
         [
             "scan",
+            "--camera",
+            "Street",
+            "--from",
+            "2026-10-20 21:00",
+            "--to",
+            "2026-10-21 02:00",
             "--threshold",
             "0.4",
             "--class-threshold",
