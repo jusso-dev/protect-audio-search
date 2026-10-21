@@ -31,6 +31,10 @@ On first use the TFLite model and the class map are downloaded and checked again
 
 After the cache is warm, `PROTECT_AUDIO_SEARCH_OFFLINE=1` makes a missing file fail instead of downloading.
 
+## Experimental scan server
+
+`python -m protect_audio_search.search_mcp` is not a supported interface. The decision is in [docs/search-audio-events.md](docs/search-audio-events.md). It uses the same environment and the same two Protect read tools as the CLI. Tool arguments are a camera and a time range, not credentials. A failed job stores redacted error text in memory only.
+
 ## Data that leaves the machine
 
 A scan without `--confirm` keeps clips and snapshots local. It still talks to your Protect console (or to whatever host the MCP server is configured to use) and, once, to the model download URLs.
