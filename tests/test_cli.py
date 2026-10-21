@@ -13,6 +13,7 @@ from protect_audio_search.audio import FfmpegMissingError
 from protect_audio_search.cli import main
 from protect_audio_search.events import DetectionEvent
 from protect_audio_search.footage import Camera
+from protect_audio_search.scan import ScanOutput
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "docs" / "scan-result.schema.json"
 START = datetime(2026, 10, 20, 10, 0, tzinfo=UTC)
@@ -60,6 +61,10 @@ def test_scan_help_documents_every_option(capsys: pytest.CaptureFixture[str]) ->
         "--json",
         "--csv",
         "--dry-run",
+        "--clips",
+        "--clip-padding",
+        "--snapshots",
+        "--cleanup-chunks",
         "--threshold",
         "--class-threshold",
         "--smooth-frames",
@@ -156,7 +161,7 @@ def test_scan_prints_hits_json_and_csv(
         progress = kwargs["progress"]
         assert callable(progress)
         progress(1, 30, START, START + timedelta(minutes=10))
-        return [_event()]
+        return ScanOutput(events=[_event()], chunks=[])
 
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", fake_prepare)
     monkeypatch.setattr("protect_audio_search.cli.run_scan", fake_scan)
@@ -200,6 +205,8 @@ def test_scan_prints_hits_json_and_csv(
     assert payload["end_utc"] == "2026-10-20T15:00:00Z"
     assert payload["events"][0]["start"] == "2026-10-20T21:00:00+11:00"
     assert payload["events"][0]["contributing_classes"] == ["Engine", "Motorcycle"]
+    assert payload["events"][0]["clip"] is None
+    assert payload["events"][0]["snapshots"] == []
 
     csv_text = csv_path.read_text(encoding="utf-8")
     assert "peak_class" in csv_text
@@ -213,7 +220,10 @@ def test_no_hits_exits_zero_and_writes_empty_json(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
-    monkeypatch.setattr("protect_audio_search.cli.run_scan", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        "protect_audio_search.cli.run_scan",
+        lambda **_kwargs: ScanOutput(events=[], chunks=[]),
+    )
     json_path = tmp_path / "empty.json"
     main(
         [

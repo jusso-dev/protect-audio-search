@@ -14,6 +14,12 @@ from protect_audio_search.classifier import (
     ModelHashError,
     UnknownClassError,
 )
+from protect_audio_search.clips import (
+    DEFAULT_PADDING_SECONDS,
+    capture_events,
+    delete_chunks,
+    review_directory,
+)
 from protect_audio_search.events import add_event_arguments, detect_events, event_config_from_args
 from protect_audio_search.footage import (
     DEFAULT_CHUNK_MINUTES,
@@ -99,6 +105,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the planned chunks. Do not export footage or classify audio",
     )
+    scan.add_argument(
+        "--clips",
+        action="store_true",
+        help="Trim an MP4 for each event from the local chunks",
+    )
+    scan.add_argument(
+        "--clip-padding",
+        type=float,
+        default=DEFAULT_PADDING_SECONDS,
+        help=f"Seconds of padding before and after each clip (default {DEFAULT_PADDING_SECONDS:g})",
+    )
+    scan.add_argument(
+        "--snapshots",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Save N evenly spaced JPEG frames for each event. 0 turns snapshots off",
+    )
+    scan.add_argument(
+        "--cleanup-chunks",
+        action="store_true",
+        help="Delete the exported footage chunks when the run finishes",
+    )
     add_event_arguments(scan)
     return parser
 
@@ -145,6 +174,10 @@ def _scan(args: argparse.Namespace) -> None:
     end = parse_user_time(args.to_time, tz)
     if args.chunk_minutes <= 0:
         raise ValueError("chunk_minutes must be a positive number of minutes")
+    if args.clip_padding < 0:
+        raise ValueError("clip padding must be zero or positive")
+    if args.snapshots < 0:
+        raise ValueError("snapshot count must be zero or positive")
     if end <= start:
         raise ValueError("end must be after start")
     config = event_config_from_args(args)
@@ -163,7 +196,7 @@ def _scan(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
-    events = run_scan(
+    scanned = run_scan(
         camera=args.camera,
         start=start,
         end=end,
@@ -172,12 +205,30 @@ def _scan(args: argparse.Namespace) -> None:
         chunk_minutes=args.chunk_minutes,
         progress=progress,
     )
+    clip_paths: tuple[str | None, ...] = ()
+    snapshot_paths: tuple[tuple[str, ...], ...] = ()
+    if args.clips or args.snapshots:
+        media = capture_events(
+            scanned.events,
+            scanned.chunks,
+            run_dir=review_directory(args.output_dir, args.camera, start),
+            padding_seconds=args.clip_padding,
+            write_clips=args.clips,
+            snapshot_count=args.snapshots,
+        )
+        clip_paths = tuple(None if item.clip is None else item.clip.as_posix() for item in media)
+        snapshot_paths = tuple(tuple(path.as_posix() for path in item.snapshots) for item in media)
+    if args.cleanup_chunks:
+        removed = delete_chunks(scanned.chunks)
+        print(f"Deleted {removed} footage chunks.", file=sys.stderr)
     result = ScanResult(
         camera=args.camera,
         timezone=args.tz,
         start=start,
         end=end,
-        events=tuple(events),
+        events=tuple(scanned.events),
+        clip_paths=clip_paths,
+        snapshot_paths=snapshot_paths,
     )
     print(render_table(result, tz))
     if args.json_path is not None:

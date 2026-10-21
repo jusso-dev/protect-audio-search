@@ -36,6 +36,12 @@ class PlannedChunk:
     end: datetime
 
 
+@dataclass(frozen=True)
+class ScanOutput:
+    events: list[DetectionEvent]
+    chunks: list[FootageChunk]
+
+
 def plan_chunks(start: datetime, end: datetime, chunk_minutes: int) -> list[PlannedChunk]:
     ranges = split_range(start, end, chunk_minutes)
     count = len(ranges)
@@ -74,8 +80,8 @@ def run_scan(
     load_audio: AudioLoader | None = None,
     score_audio: Scorer | None = None,
     progress: Progress = default_progress,
-) -> list[DetectionEvent]:
-    """Export each chunk, classify target classes, and return events."""
+) -> ScanOutput:
+    """Export each chunk, classify target classes, and return events plus chunks."""
     planned = plan_chunks(start, end, chunk_minutes)
     if exporter is None:
         chunks = asyncio.run(
@@ -112,7 +118,10 @@ def run_scan(
                     scores=frame.scores,
                 )
             )
-    return detect_events(frames, camera=camera, config=event_config)
+    return ScanOutput(
+        events=detect_events(frames, camera=camera, config=event_config),
+        chunks=chunks,
+    )
 
 
 def _load_audio(path: Path, *, camera: str, chunk_label: str) -> object | None:

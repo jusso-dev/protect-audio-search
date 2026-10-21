@@ -24,7 +24,9 @@
           "peak_class",
           "peak_score",
           "mean_score",
-          "contributing_classes"
+          "contributing_classes",
+          "clip",
+          "snapshots"
         ],
         "properties": {
           "camera": { "type": "string" },
@@ -33,7 +35,9 @@
           "peak_class": { "type": "string" },
           "peak_score": { "type": "number" },
           "mean_score": { "type": "number" },
-          "contributing_classes": { "type": "array", "items": { "type": "string" } }
+          "contributing_classes": { "type": "array", "items": { "type": "string" } },
+          "clip": { "type": ["string", "null"] },
+          "snapshots": { "type": "array", "items": { "type": "string" } }
         }
       }
     }
