@@ -16,9 +16,21 @@ from protect_audio_search.classifier import (
 )
 from protect_audio_search.clips import (
     DEFAULT_PADDING_SECONDS,
+    EventMedia,
     capture_events,
     delete_chunks,
     review_directory,
+)
+from protect_audio_search.confirm import (
+    DEFAULT_MAX_CALLS,
+    DEFAULT_MAX_COST_USD,
+    DEFAULT_MAX_IMAGES,
+    Confirmation,
+    ConfirmBudget,
+    ConfirmError,
+    build_anthropic_provider,
+    confirm_events,
+    format_notice,
 )
 from protect_audio_search.events import add_event_arguments, detect_events, event_config_from_args
 from protect_audio_search.footage import (
@@ -128,6 +140,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete the exported footage chunks when the run finishes",
     )
+    scan.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Images leave this machine. See docs/vision-confirmation.md",
+    )
+    scan.add_argument(
+        "--confirm-images",
+        type=int,
+        default=DEFAULT_MAX_IMAGES,
+        help=f"Most images to send per event (default {DEFAULT_MAX_IMAGES})",
+    )
+    scan.add_argument(
+        "--confirm-max-calls",
+        type=int,
+        default=DEFAULT_MAX_CALLS,
+        help=f"Most vision calls in one run (default {DEFAULT_MAX_CALLS})",
+    )
+    scan.add_argument(
+        "--confirm-max-cost",
+        type=float,
+        default=DEFAULT_MAX_COST_USD,
+        help=f"Stop once estimated cost reaches this many USD (default {DEFAULT_MAX_COST_USD})",
+    )
     add_event_arguments(scan)
     return parser
 
@@ -145,7 +180,7 @@ def main(argv: list[str] | None = None) -> None:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from exc
-    except (AudioError, ProtectClientError, ModelHashError, UnknownClassError) as exc:
+    except (AudioError, ProtectClientError, ModelHashError, UnknownClassError, ConfirmError) as exc:
         print(redact(str(exc)), file=sys.stderr)
         raise SystemExit(1) from exc
 
@@ -178,6 +213,14 @@ def _scan(args: argparse.Namespace) -> None:
         raise ValueError("clip padding must be zero or positive")
     if args.snapshots < 0:
         raise ValueError("snapshot count must be zero or positive")
+    if args.confirm and args.snapshots < 1:
+        raise ValueError("Pass --snapshots N with --confirm. The images are those snapshots.")
+    if args.confirm_images < 1:
+        raise ValueError("confirm image cap must be at least 1")
+    if args.confirm_max_calls < 1:
+        raise ValueError("confirm call cap must be at least 1")
+    if args.confirm_max_cost < 0:
+        raise ValueError("confirm cost cap must be zero or positive")
     if end <= start:
         raise ValueError("end must be after start")
     config = event_config_from_args(args)
@@ -207,6 +250,7 @@ def _scan(args: argparse.Namespace) -> None:
     )
     clip_paths: tuple[str | None, ...] = ()
     snapshot_paths: tuple[tuple[str, ...], ...] = ()
+    media: list[EventMedia] = []
     if args.clips or args.snapshots:
         media = capture_events(
             scanned.events,
@@ -218,6 +262,20 @@ def _scan(args: argparse.Namespace) -> None:
         )
         clip_paths = tuple(None if item.clip is None else item.clip.as_posix() for item in media)
         snapshot_paths = tuple(tuple(path.as_posix() for path in item.snapshots) for item in media)
+    confirmations: tuple[Confirmation | None, ...] = ()
+    if args.confirm:
+        print(format_notice(), file=sys.stderr)
+        confirmed, summary = confirm_events(
+            [item.snapshots for item in media],
+            build_anthropic_provider(),
+            ConfirmBudget(
+                max_images_per_event=args.confirm_images,
+                max_calls=args.confirm_max_calls,
+                max_cost_usd=args.confirm_max_cost,
+            ),
+        )
+        confirmations = tuple(confirmed)
+        print(summary.render(), file=sys.stderr)
     if args.cleanup_chunks:
         removed = delete_chunks(scanned.chunks)
         print(f"Deleted {removed} footage chunks.", file=sys.stderr)
@@ -229,6 +287,7 @@ def _scan(args: argparse.Namespace) -> None:
         events=tuple(scanned.events),
         clip_paths=clip_paths,
         snapshot_paths=snapshot_paths,
+        confirmations=confirmations,
     )
     print(render_table(result, tz))
     if args.json_path is not None:

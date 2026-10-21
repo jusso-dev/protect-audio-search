@@ -26,7 +26,8 @@
           "mean_score",
           "contributing_classes",
           "clip",
-          "snapshots"
+          "snapshots",
+          "confirmation"
         ],
         "properties": {
           "camera": { "type": "string" },
@@ -37,7 +38,30 @@
           "mean_score": { "type": "number" },
           "contributing_classes": { "type": "array", "items": { "type": "string" } },
           "clip": { "type": ["string", "null"] },
-          "snapshots": { "type": "array", "items": { "type": "string" } }
+          "snapshots": { "type": "array", "items": { "type": "string" } },
+          "confirmation": {
+            "anyOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "vehicle_present",
+                  "smoke_present",
+                  "plate_text",
+                  "plate_confidence",
+                  "note"
+                ],
+                "properties": {
+                  "vehicle_present": { "type": ["boolean", "null"] },
+                  "smoke_present": { "type": ["boolean", "null"] },
+                  "plate_text": { "type": ["string", "null"] },
+                  "plate_confidence": { "type": ["number", "null"] },
+                  "note": { "type": "string" }
+                }
+              }
+            ]
+          }
         }
       }
     }

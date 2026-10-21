@@ -65,6 +65,10 @@ def test_scan_help_documents_every_option(capsys: pytest.CaptureFixture[str]) ->
         "--clip-padding",
         "--snapshots",
         "--cleanup-chunks",
+        "--confirm",
+        "--confirm-images",
+        "--confirm-max-calls",
+        "--confirm-max-cost",
         "--threshold",
         "--class-threshold",
         "--smooth-frames",
@@ -74,6 +78,7 @@ def test_scan_help_documents_every_option(capsys: pytest.CaptureFixture[str]) ->
         assert flag in text
     assert "docs/scan-result.schema.json" in text
     assert "Australia/Sydney" in text
+    assert "Images leave this machine." in text
 
 
 def test_missing_scan_args_exit_nonzero() -> None:
