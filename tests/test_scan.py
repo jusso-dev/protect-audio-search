@@ -38,7 +38,7 @@ def test_run_scan_times_frames_from_each_chunk(tmp_path: Path) -> None:
         assert chunk_label == path.name
         return path.name
 
-    events = run_scan(
+    scanned = run_scan(
         camera="Street",
         start=START,
         end=end,
@@ -51,10 +51,11 @@ def test_run_scan_times_frames_from_each_chunk(tmp_path: Path) -> None:
         progress=lambda index, count, _start, _end: progress.append((index, count)),
     )
     assert progress == [(1, 2), (2, 2)]
-    assert len(events) == 2
-    assert events[0].start == START
-    assert events[0].camera == "Street"
-    assert events[1].start == second
+    assert len(scanned.events) == 2
+    assert scanned.chunks == chunks
+    assert scanned.events[0].start == START
+    assert scanned.events[0].camera == "Street"
+    assert scanned.events[1].start == second
     assert run_scan.__kwdefaults__ is not None
     assert run_scan.__kwdefaults__["class_names"] == DEFAULT_TARGET_CLASSES
 
@@ -66,7 +67,7 @@ def test_silent_chunk_is_skipped(tmp_path: Path) -> None:
     def refuse_score(_waveform: object) -> list[FrameScore]:
         raise AssertionError("silent audio must not be scored")
 
-    events = run_scan(
+    scanned = run_scan(
         camera="Street",
         start=START,
         end=end,
@@ -76,4 +77,4 @@ def test_silent_chunk_is_skipped(tmp_path: Path) -> None:
         load_audio=lambda *_args, **_kwargs: None,
         score_audio=refuse_score,
     )
-    assert events == []
+    assert scanned.events == []

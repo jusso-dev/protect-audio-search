@@ -22,9 +22,24 @@ class ScanResult:
     start: datetime
     end: datetime
     events: tuple[DetectionEvent, ...]
+    clip_paths: tuple[str | None, ...] = ()
+    snapshot_paths: tuple[tuple[str, ...], ...] = ()
+
+
+def _aligned_media(
+    result: ScanResult,
+) -> tuple[tuple[str | None, ...], tuple[tuple[str, ...], ...]]:
+    count = len(result.events)
+    clips = result.clip_paths or tuple(None for _ in range(count))
+    empty: tuple[str, ...] = ()
+    snapshots = result.snapshot_paths or tuple(empty for _ in range(count))
+    if len(clips) != count or len(snapshots) != count:
+        raise ValueError("clip and snapshot paths must match the event count")
+    return clips, snapshots
 
 
 def result_payload(result: ScanResult, tz: ZoneInfo) -> dict[str, object]:
+    clips, snapshots = _aligned_media(result)
     return {
         "schema_version": SCHEMA_VERSION,
         "camera": result.camera,
@@ -40,8 +55,10 @@ def result_payload(result: ScanResult, tz: ZoneInfo) -> dict[str, object]:
                 "peak_score": event.peak_score,
                 "mean_score": event.mean_score,
                 "contributing_classes": list(event.contributing_classes),
+                "clip": clip,
+                "snapshots": list(snaps),
             }
-            for event in result.events
+            for event, clip, snaps in zip(result.events, clips, snapshots, strict=True)
         ],
     }
 
@@ -64,10 +81,13 @@ def write_csv(path: Path, result: ScanResult, tz: ZoneInfo) -> None:
                 "peak_score",
                 "mean_score",
                 "contributing_classes",
+                "clip",
+                "snapshots",
             ],
         )
         writer.writeheader()
-        for event in result.events:
+        clips, snapshots = _aligned_media(result)
+        for event, clip, snaps in zip(result.events, clips, snapshots, strict=True):
             writer.writerow(
                 {
                     "camera": event.camera,
@@ -77,6 +97,8 @@ def write_csv(path: Path, result: ScanResult, tz: ZoneInfo) -> None:
                     "peak_score": f"{event.peak_score:.3f}",
                     "mean_score": f"{event.mean_score:.3f}",
                     "contributing_classes": "|".join(event.contributing_classes),
+                    "clip": clip or "",
+                    "snapshots": "|".join(snaps),
                 }
             )
 
