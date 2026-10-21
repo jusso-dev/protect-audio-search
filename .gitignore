@@ -25,6 +25,7 @@ snapshots/
 models/
 *.mp4
 *.wav
+!tests/fixtures/*.wav
 *.flac
 *.tflite
 *.onnx

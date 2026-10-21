@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "Justin Middler" }]
 dependencies = [
+  "ai-edge-litert>=2.0,<3",
   "mcp>=2.3,<3",
   "numpy>=2.1",
 ]
@@ -38,6 +39,10 @@ python_version = "3.11"
 strict = true
 packages = ["protect_audio_search"]
 mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = "ai_edge_litert.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
