@@ -237,6 +237,56 @@ async def export_footage(
         raise ProtectClientError(redact(f"MCP server failed to start: {exc}")) from exc
 
 
+async def list_cameras(
+    *,
+    command: str = DEFAULT_COMMAND,
+    args: Sequence[str] = DEFAULT_ARGS,
+    tool_names: ToolNames | None = None,
+    env: Mapping[str, str] | None = None,
+    tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
+) -> list[Camera]:
+    """Return cameras from the MCP server. Read-only."""
+    names = tool_names or ToolNames()
+    child_env = dict(os.environ if env is None else env)
+    params = StdioServerParameters(command=command, args=list(args), env=child_env)
+    try:
+        async with (
+            stdio_client(params) as (read, write),
+            ClientSession(read, write, read_timeout_seconds=tool_timeout_seconds) as session,
+        ):
+            try:
+                await session.initialize()
+            except Exception as exc:
+                raise ProtectClientError(
+                    redact(f"MCP server failed during startup: {exc}")
+                ) from exc
+            try:
+                listed = await _call_tool(session, names.list_cameras, {})
+            except ToolFailed as exc:
+                raise ProtectClientError(redact(f"Could not list cameras: {exc}")) from exc
+            return parse_cameras(listed)
+    except ProtectClientError:
+        raise
+    except FileNotFoundError as exc:
+        raise ProtectClientError(
+            f"Could not start MCP server command {command!r}: {exc}. Check it is on PATH."
+        ) from exc
+    except Exception as exc:
+        found = _find_client_error(exc)
+        if found is not None:
+            raise found from None
+        raise ProtectClientError(redact(f"MCP server failed to start: {exc}")) from exc
+
+
+def list_cameras_sync(**kwargs: Any) -> list[Camera]:
+    """Synchronous wrapper around `list_cameras`."""
+    try:
+        return asyncio.run(list_cameras(**kwargs))
+    except ProtectClientError as exc:
+        print(redact(str(exc)), file=sys.stderr)
+        raise SystemExit(1) from exc
+
+
 def export_footage_or_exit(**kwargs: Any) -> list[FootageChunk]:
     """Run `export_footage` and exit 1 with a readable message on failure."""
     try:
