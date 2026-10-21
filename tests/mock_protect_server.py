@@ -7,12 +7,14 @@ Controlled by environment variables so tests stay offline:
 - ``MOCK_CAMERAS``: JSON list of ``{"id", "name"}`` objects
 - ``MOCK_FAIL_FIRST``: fail this many export calls with a transient error
 - ``MOCK_PERMANENT_ERROR``: fail every export with this message
+- ``MOCK_MEDIA_WAV``: mux this wav into a 3 second MP4 instead of a fake file
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 from mcp.server import MCPServer
@@ -66,8 +68,50 @@ def export_video(cameraId: str, start: str, end: str) -> dict[str, object]:
     directory.mkdir(parents=True, exist_ok=True)
     safe = f"{cameraId}-{start.replace(':', '')}-{end.replace(':', '')}.mp4"
     path = directory / safe
-    path.write_bytes(b"\x00\x00\x00\x18ftypmp42fake")
+    _write_export(path)
     return {"path": str(path), "bytes": path.stat().st_size}
+
+
+def _write_export(path: Path) -> None:
+    wav = os.environ.get("MOCK_MEDIA_WAV")
+    if not wav:
+        path.write_bytes(b"\x00\x00\x00\x18ftypmp42fake")
+        return
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-nostdin",
+            "-v",
+            "error",
+            "-stream_loop",
+            "-1",
+            "-i",
+            wav,
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=32x32:rate=10:duration=3",
+            "-t",
+            "3",
+            "-map",
+            "1:v",
+            "-map",
+            "0:a",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(path),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ToolError(f"fixture ffmpeg failed: {detail or 'unknown error'}")
 
 
 if __name__ == "__main__":
