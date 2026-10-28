@@ -8,7 +8,7 @@ license = "Apache-2.0"
 authors = [{ name = "Justin Middler" }]
 dependencies = [
   "ai-edge-litert>=2.0,<3",
-  "anthropic>=1.13,<2",
+  "anthropic>=1.13,<3",
   "mcp>=2.3,<3",
   "numpy>=2.1",
 ]
