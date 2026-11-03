@@ -128,13 +128,15 @@ def media_duration_seconds(path: Path) -> float:
         raise AudioError(f"ffprobe did not report a duration for {path.name}") from exc
 
 
-def _run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+def _run(command: list[str], timeout: float = 600) -> subprocess.CompletedProcess[bytes]:
     try:
-        result = subprocess.run(command, check=False, capture_output=True, timeout=120)
+        result = subprocess.run(command, check=False, capture_output=True, timeout=timeout)
     except FileNotFoundError as exc:
         raise FfmpegMissingError(
             f"{command[0]} is not on PATH, so no footage was exported. {_INSTALL_HINT}"
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AudioError(f"{command[0]} took longer than {timeout:g} seconds") from exc
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise AudioError(f"{command[0]} failed for the chunk: {detail or 'unknown error'}")

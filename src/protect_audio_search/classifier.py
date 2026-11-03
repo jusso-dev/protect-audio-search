@@ -110,7 +110,7 @@ class ClassMap:
         try:
             return self._index[name]
         except KeyError as exc:
-            raise UnknownClassError(name, _suggestions(name, self.names)) from exc
+            raise UnknownClassError(name, suggest_class_names(name, self.names)) from exc
 
     def indices(self, names: list[str] | tuple[str, ...]) -> dict[str, int]:
         return {name: self.index(name) for name in names}
@@ -168,9 +168,13 @@ def classify(
     waveform = np.asarray(samples, dtype=np.float32).reshape(-1)
     if waveform.size < WINDOW_SAMPLES:
         waveform = np.pad(waveform, (0, WINDOW_SAMPLES - waveform.size))
+    starts = list(range(0, waveform.size - WINDOW_SAMPLES + 1, HOP_SAMPLES))
+    if starts[-1] + WINDOW_SAMPLES < waveform.size:
+        # Score the tail too, zero-padded, so the end of a chunk is not dropped.
+        starts.append(starts[-1] + HOP_SAMPLES)
+        waveform = np.pad(waveform, (0, starts[-1] + WINDOW_SAMPLES - waveform.size))
     frames: list[FrameScore] = []
-    start = 0
-    while start + WINDOW_SAMPLES <= waveform.size:
+    for start in starts:
         window = waveform[start : start + WINDOW_SAMPLES]
         raw = scorer.score_window(window)
         if raw.shape != (CLASS_COUNT,):
@@ -181,7 +185,6 @@ def classify(
                 scores={name: float(raw[index]) for name, index in wanted.items()},
             )
         )
-        start += HOP_SAMPLES
     return frames
 
 
@@ -239,7 +242,7 @@ def _ensure_file(path: Path, url: str, expected: str) -> None:
     os.replace(temporary, path)
 
 
-def _suggestions(name: str, names: list[str]) -> list[str]:
+def suggest_class_names(name: str, names: list[str]) -> list[str]:
     folded = name.casefold()
     contains = [candidate for candidate in names if folded in candidate.casefold()]
     if contains:

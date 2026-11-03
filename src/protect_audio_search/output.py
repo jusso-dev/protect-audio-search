@@ -4,16 +4,42 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from protect_audio_search import __version__
 from protect_audio_search.confirm import Confirmation
 from protect_audio_search.events import DetectionEvent
 from protect_audio_search.times import format_utc, format_zoned
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# A spreadsheet runs a cell that starts with one of these as a formula.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+@dataclass(frozen=True)
+class ChunkNote:
+    """A chunk that was not scored, or was scored with a warning."""
+
+    start: datetime
+    end: datetime
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    """What a scan covered, so an empty result can be told apart from a deaf one."""
+
+    settings: Mapping[str, object] = field(default_factory=dict)
+    chunks_planned: int = 0
+    chunks_scored: int = 0
+    without_audio: tuple[ChunkNote, ...] = ()
+    failed: tuple[ChunkNote, ...] = ()
+    short_audio: tuple[ChunkNote, ...] = ()
+    review_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +52,8 @@ class ScanResult:
     clip_paths: tuple[str | None, ...] = ()
     snapshot_paths: tuple[tuple[str, ...], ...] = ()
     confirmations: tuple[Confirmation | None, ...] = ()
+    media_errors: tuple[str | None, ...] = ()
+    run: RunSummary | None = None
 
 
 def _aligned_media(
@@ -48,6 +76,38 @@ def _aligned_confirmations(result: ScanResult) -> tuple[Confirmation | None, ...
     return result.confirmations
 
 
+def _aligned_errors(result: ScanResult) -> tuple[str | None, ...]:
+    if not result.media_errors:
+        return tuple(None for _ in result.events)
+    if len(result.media_errors) != len(result.events):
+        raise ValueError("media errors must match the event count")
+    return result.media_errors
+
+
+def _notes(notes: tuple[ChunkNote, ...], *, with_reason: bool) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for note in notes:
+        row = {"start_utc": format_utc(note.start), "end_utc": format_utc(note.end)}
+        if with_reason:
+            row["error"] = note.reason
+        rows.append(row)
+    return rows
+
+
+def _run_payload(run: RunSummary | None) -> dict[str, object] | None:
+    if run is None:
+        return None
+    return {
+        "settings": dict(run.settings),
+        "chunks_planned": run.chunks_planned,
+        "chunks_scored": run.chunks_scored,
+        "chunks_without_audio": _notes(run.without_audio, with_reason=False),
+        "chunks_failed": _notes(run.failed, with_reason=True),
+        "chunks_short_audio": _notes(run.short_audio, with_reason=False),
+        "review_dir": run.review_dir,
+    }
+
+
 def _confirmation_payload(item: Confirmation | None) -> dict[str, object] | None:
     if item is None:
         return None
@@ -63,14 +123,18 @@ def _confirmation_payload(item: Confirmation | None) -> dict[str, object] | None
 def result_payload(result: ScanResult, tz: ZoneInfo) -> dict[str, object]:
     clips, snapshots = _aligned_media(result)
     confirmations = _aligned_confirmations(result)
+    errors = _aligned_errors(result)
     return {
         "schema_version": SCHEMA_VERSION,
+        "tool_version": __version__,
         "camera": result.camera,
         "timezone": result.timezone,
         "start_utc": format_utc(result.start),
         "end_utc": format_utc(result.end),
+        "run": _run_payload(result.run),
         "events": [
             {
+                "number": number,
                 "camera": event.camera,
                 "start": format_zoned(event.start, tz),
                 "end": format_zoned(event.end, tz),
@@ -81,9 +145,11 @@ def result_payload(result: ScanResult, tz: ZoneInfo) -> dict[str, object]:
                 "clip": clip,
                 "snapshots": list(snaps),
                 "confirmation": _confirmation_payload(confirmation),
+                "media_error": error,
             }
-            for event, clip, snaps, confirmation in zip(
-                result.events, clips, snapshots, confirmations, strict=True
+            for number, (event, clip, snaps, confirmation, error) in enumerate(
+                zip(result.events, clips, snapshots, confirmations, errors, strict=True),
+                start=1,
             )
         ],
     }
@@ -100,6 +166,7 @@ def write_csv(path: Path, result: ScanResult, tz: ZoneInfo) -> None:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
+                "number",
                 "camera",
                 "start",
                 "end",
@@ -114,28 +181,37 @@ def write_csv(path: Path, result: ScanResult, tz: ZoneInfo) -> None:
                 "plate_text",
                 "plate_confidence",
                 "confirm_note",
+                "media_error",
             ],
         )
         writer.writeheader()
         clips, snapshots = _aligned_media(result)
         confirmations = _aligned_confirmations(result)
-        for event, clip, snaps, confirmation in zip(
-            result.events, clips, snapshots, confirmations, strict=True
+        errors = _aligned_errors(result)
+        for number, (event, clip, snaps, confirmation, error) in enumerate(
+            zip(result.events, clips, snapshots, confirmations, errors, strict=True),
+            start=1,
         ):
-            writer.writerow(
-                {
-                    "camera": event.camera,
-                    "start": format_zoned(event.start, tz),
-                    "end": format_zoned(event.end, tz),
-                    "peak_class": event.peak_class,
-                    "peak_score": f"{event.peak_score:.3f}",
-                    "mean_score": f"{event.mean_score:.3f}",
-                    "contributing_classes": "|".join(event.contributing_classes),
-                    "clip": clip or "",
-                    "snapshots": "|".join(snaps),
-                    **_confirm_csv(confirmation),
-                }
-            )
+            row = {
+                "number": str(number),
+                "camera": event.camera,
+                "start": format_zoned(event.start, tz),
+                "end": format_zoned(event.end, tz),
+                "peak_class": event.peak_class,
+                "peak_score": f"{event.peak_score:.3f}",
+                "mean_score": f"{event.mean_score:.3f}",
+                "contributing_classes": "|".join(event.contributing_classes),
+                "clip": clip or "",
+                "snapshots": "|".join(snaps),
+                **_confirm_csv(confirmation),
+                "media_error": error or "",
+            }
+            writer.writerow({key: _cell(value) for key, value in row.items()})
+
+
+def _cell(value: str) -> str:
+    """Stop a spreadsheet treating text (a plate from the vision model, say) as a formula."""
+    return "'" + value if value.startswith(_FORMULA_PREFIXES) else value
 
 
 def _confirm_cells(item: Confirmation | None) -> tuple[str, str, str]:
@@ -176,12 +252,15 @@ def render_table(result: ScanResult, tz: ZoneInfo) -> str:
         return "No events."
     confirmations = _aligned_confirmations(result)
     show_confirm = any(item is not None for item in confirmations)
-    headers = ["start", "end", "class", "score", "mean", "classes"]
+    headers = ["#", "start", "end", "class", "score", "mean", "classes"]
     if show_confirm:
         headers.extend(["vehicle", "smoke", "plate"])
     rows: list[list[str]] = []
-    for event, confirmation in zip(result.events, confirmations, strict=True):
+    for number, (event, confirmation) in enumerate(
+        zip(result.events, confirmations, strict=True), start=1
+    ):
         row = [
+            f"{number:04d}",
             format_zoned(event.start, tz),
             format_zoned(event.end, tz),
             event.peak_class,

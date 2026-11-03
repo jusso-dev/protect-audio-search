@@ -166,7 +166,7 @@ def test_scan_prints_hits_json_and_csv(
         progress = kwargs["progress"]
         assert callable(progress)
         progress(1, 30, START, START + timedelta(minutes=10))
-        return ScanOutput(events=[_event()], chunks=[])
+        return ScanOutput(scored=1, events=[_event()], chunks=[])
 
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", fake_prepare)
     monkeypatch.setattr("protect_audio_search.cli.run_scan", fake_scan)
@@ -204,7 +204,7 @@ def test_scan_prints_hits_json_and_csv(
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     jsonschema.validate(payload, _schema())
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["timezone"] == "Australia/Sydney"
     assert payload["start_utc"] == "2026-10-20T10:00:00Z"
     assert payload["end_utc"] == "2026-10-20T15:00:00Z"
@@ -227,7 +227,7 @@ def test_no_hits_exits_zero_and_writes_empty_json(
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
     monkeypatch.setattr(
         "protect_audio_search.cli.run_scan",
-        lambda **_kwargs: ScanOutput(events=[], chunks=[]),
+        lambda **_kwargs: ScanOutput(scored=1, events=[], chunks=[]),
     )
     json_path = tmp_path / "empty.json"
     main(

@@ -7,7 +7,7 @@ Do not proceed. This note, and the prototype behind `python -m protect_audio_sea
 Reasons:
 
 1. A real multi-hour Protect scan has not been run. The CLI hits are not proven on the footage this tool is for. Freezing an assistant-facing schema before that run would lock in the wrong shape.
-2. A five-hour range is thirty exports. `run_scan` exports every chunk before it reports progress, and each export can take a long time. Holding one MCP call open across that work will be cut off by the client. The prototype returns a job id instead, but the job lives only in memory.
+2. A five-hour range is thirty exports, and each export can take a long time. Holding one MCP call open across that work will be cut off by the client. The prototype returns a job id instead, but the job lives only in memory.
 3. A supported tool needs a durable job directory, progress on each export chunk, cancellation, and a cap on stored jobs. That is a second product. The CLI already scans.
 4. The useful assistant step is reviewing frames. Those results must be file paths, never image bytes. This prototype does not write clips or snapshots. Adding them here would copy the CLI.
 
@@ -33,9 +33,8 @@ Start a scan. The call returns as soon as the job is recorded. It does not wait 
 | `start` | yes | | `YYYY-MM-DD HH:MM`, or an ISO 8601 value. A naive value is read in `tz` |
 | `end` | yes | | Exclusive end, same format. Must be after `start` |
 | `tz` | no | `Australia/Sydney` | Zone for naive times and for event times in the result |
-| `output_dir` | no | `exports` | Footage chunk directory |
 
-There is no threshold, clip, snapshot, or confirm argument. Those stay on the CLI.
+There is no output directory, threshold, clip, snapshot, or confirm argument. Those stay on the CLI. Footage goes to `exports` under the server's working directory, so a tool caller cannot choose where footage is written.
 
 The response uses the status shape:
 
@@ -51,7 +50,7 @@ The response uses the status shape:
 }
 ```
 
-`chunks_total` comes from the chunk plan and is known before export starts. `chunk_index` stays 0 during export. Today's `run_scan` progress callback runs only after every chunk has been exported, when a chunk is about to be scored. `phase` then becomes `score`, and `chunk_index` is that chunk, counting from 1. A long export therefore looks idle. That gap is one reason not to proceed.
+`chunks_total` comes from the chunk plan and is known before export starts. `chunk_index` is 0 until the first chunk is exported. `run_scan` scores each chunk as soon as it lands, so `phase` becomes `score` and `chunk_index` is the chunk most recently scored, counting from 1. The export of the next chunk is not reported, so a slow export still looks idle.
 
 ### search_audio_events_status
 
@@ -62,7 +61,7 @@ Input: `job_id` (string, required).
 | `state` | `running`, `succeeded`, or `failed` |
 | `phase` | `export`, `score`, `done`, or `failed` |
 | `chunks_total` | Planned chunks |
-| `chunk_index` | `0` during export, then the chunk being scored, then `chunks_total` when done |
+| `chunk_index` | `0` before the first chunk lands, then the chunk most recently scored, then `chunks_total` when done |
 | `event_count` | `null` until the job succeeds |
 | `message` | Empty, or the redacted failure text |
 

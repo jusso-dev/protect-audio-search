@@ -1,6 +1,7 @@
 """Trim local footage chunks into review clips and JPEG snapshots.
 
-Cuts stay on this machine. Nothing is uploaded.
+Cuts stay on this machine. Nothing is uploaded. A clip or snapshot that cannot
+be written is recorded on that event, and the other events carry on.
 """
 
 from __future__ import annotations
@@ -13,18 +14,28 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from protect_audio_search.audio import AudioError, FfmpegMissingError, has_audio_stream
+from protect_audio_search.audio import (
+    AudioError,
+    FfmpegMissingError,
+    has_audio_stream,
+    media_duration_seconds,
+)
 from protect_audio_search.events import DetectionEvent
-from protect_audio_search.footage import FootageChunk
+from protect_audio_search.footage import FootageChunk, sidecar_path
 from protect_audio_search.times import format_utc
 
 DEFAULT_PADDING_SECONDS = 5.0
+# One frame at 10 fps. Seeking closer to the end than this can return no frame.
+_END_GUARD_SECONDS = 0.1
+_STALE_CLIP = re.compile(r"^\d{4}\.mp4$")
+_STALE_SNAPSHOT = re.compile(r"^\d{4}-\d{2}\.jpg$")
 
 
 @dataclass(frozen=True)
 class EventMedia:
     clip: Path | None
     snapshots: tuple[Path, ...]
+    error: str | None = None
 
 
 def review_directory(output_dir: Path, camera: str, start: datetime) -> Path:
@@ -48,18 +59,24 @@ def capture_events(
         raise ValueError("clip padding must be zero or positive")
     if snapshot_count < 0:
         raise ValueError("snapshot count must be zero or positive")
-    return [
-        _capture_one(
-            event,
-            chunks,
-            run_dir=run_dir,
-            index=index,
-            padding_seconds=padding_seconds,
-            write_clips=write_clips,
-            snapshot_count=snapshot_count,
+    run_dir = run_dir.resolve()
+    _clear_stale(run_dir)
+    durations: dict[Path, float] = {}
+    media: list[EventMedia] = []
+    for index, event in enumerate(events, start=1):
+        media.append(
+            _capture_one(
+                event,
+                chunks,
+                run_dir=run_dir,
+                index=index,
+                padding_seconds=padding_seconds,
+                write_clips=write_clips,
+                snapshot_count=snapshot_count,
+                durations=durations,
+            )
         )
-        for index, event in enumerate(events, start=1)
-    ]
+    return media
 
 
 def delete_chunks(chunks: Sequence[FootageChunk]) -> int:
@@ -69,7 +86,21 @@ def delete_chunks(chunks: Sequence[FootageChunk]) -> int:
         if chunk.path.is_file():
             chunk.path.unlink()
             removed += 1
+        sidecar_path(chunk.path).unlink(missing_ok=True)
     return removed
+
+
+def _clear_stale(run_dir: Path) -> None:
+    """Remove numbered files from an earlier run of the same range."""
+    for folder, pattern in (
+        (run_dir / "clips", _STALE_CLIP),
+        (run_dir / "snapshots", _STALE_SNAPSHOT),
+    ):
+        if not folder.is_dir():
+            continue
+        for path in folder.iterdir():
+            if path.is_file() and pattern.match(path.name):
+                path.unlink()
 
 
 def _capture_one(
@@ -81,19 +112,39 @@ def _capture_one(
     padding_seconds: float,
     write_clips: bool,
     snapshot_count: int,
+    durations: dict[Path, float],
 ) -> EventMedia:
     clip: Path | None = None
+    errors: list[str] = []
     if write_clips:
-        window = _clip_window(event, chunks, padding_seconds)
-        segments = _segments(chunks, window[0], window[1])
-        if not segments:
-            raise AudioError(f"No footage covers event {index}")
-        dest = run_dir / "clips" / f"{index:04d}.mp4"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        _write_clip(segments, dest)
-        clip = dest
-    snapshots = _write_snapshots(event, chunks, run_dir=run_dir, index=index, count=snapshot_count)
-    return EventMedia(clip=clip, snapshots=snapshots)
+        try:
+            window = _clip_window(event, chunks, padding_seconds)
+            segments = _segments(chunks, window[0], window[1])
+            if not segments:
+                raise AudioError(f"No footage covers event {index}")
+            dest = run_dir / "clips" / f"{index:04d}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _write_clip(segments, dest)
+            clip = dest
+        except FfmpegMissingError:
+            raise
+        except AudioError as exc:
+            errors.append(f"clip: {exc}")
+    snapshots: tuple[Path, ...] = ()
+    try:
+        snapshots = _write_snapshots(
+            event,
+            chunks,
+            run_dir=run_dir,
+            index=index,
+            count=snapshot_count,
+            durations=durations,
+        )
+    except FfmpegMissingError:
+        raise
+    except AudioError as exc:
+        errors.append(f"snapshots: {exc}")
+    return EventMedia(clip=clip, snapshots=snapshots, error="; ".join(errors) or None)
 
 
 def _clip_window(
@@ -124,7 +175,7 @@ def _segments(
         seg_end = min(end, chunk.end)
         if seg_end <= seg_start:
             continue
-        offset = (seg_start - chunk.start).total_seconds()
+        offset = max(0.0, (seg_start - chunk.origin).total_seconds())
         duration = (seg_end - seg_start).total_seconds()
         segments.append((chunk.path, offset, duration, has_audio_stream(chunk.path)))
     return segments
@@ -142,11 +193,9 @@ def _write_clip(segments: Sequence[tuple[Path, float, float, bool]], dest: Path)
         if len(parts) == 1:
             parts[0].replace(dest)
             return
+        # Bare names resolve next to the list file, so no path needs quoting.
         listing = temp / "parts.txt"
-        listing.write_text(
-            "".join(f"file '{part.as_posix()}'\n" for part in parts),
-            encoding="utf-8",
-        )
+        listing.write_text("".join(f"file '{part.name}'\n" for part in parts), encoding="utf-8")
         _ffmpeg(
             [
                 "ffmpeg",
@@ -156,8 +205,6 @@ def _write_clip(segments: Sequence[tuple[Path, float, float, bool]], dest: Path)
                 "error",
                 "-f",
                 "concat",
-                "-safe",
-                "0",
                 "-i",
                 str(listing),
                 "-c",
@@ -174,6 +221,7 @@ def _write_snapshots(
     run_dir: Path,
     index: int,
     count: int,
+    durations: dict[Path, float],
 ) -> tuple[Path, ...]:
     if count == 0:
         return ()
@@ -185,7 +233,7 @@ def _write_snapshots(
     paths: list[Path] = []
     for snap in range(count):
         when = event.start + timedelta(seconds=duration * (snap + 0.5) / count)
-        source, offset = _locate(chunks, when)
+        source, offset = _locate(chunks, when, durations)
         dest = folder / f"{index:04d}-{snap + 1:02d}.jpg"
         _ffmpeg(
             [
@@ -205,33 +253,46 @@ def _write_snapshots(
                 str(dest),
             ]
         )
+        if not dest.is_file():
+            raise AudioError(f"ffmpeg wrote no frame at {offset:.3f} s of {source.name}")
         paths.append(dest)
     return tuple(paths)
 
 
-def _locate(chunks: Sequence[FootageChunk], when: datetime) -> tuple[Path, float]:
+def _locate(
+    chunks: Sequence[FootageChunk],
+    when: datetime,
+    durations: dict[Path, float],
+) -> tuple[Path, float]:
     ordered = sorted(chunks, key=lambda item: item.start)
+    chosen: FootageChunk | None = None
     for chunk in ordered:
         if chunk.start <= when < chunk.end:
-            return chunk.path, (when - chunk.start).total_seconds()
-    if ordered and when == ordered[-1].end:
-        last = ordered[-1]
-        span = (last.end - last.start).total_seconds()
-        return last.path, max(0.0, span - 0.04)
-    raise AudioError(f"No footage covers {when.isoformat()}")
+            chosen = chunk
+            break
+    if chosen is None and ordered and when == ordered[-1].end:
+        chosen = ordered[-1]
+    if chosen is None:
+        raise AudioError(f"No footage covers {when.isoformat()}")
+    if chosen.path not in durations:
+        durations[chosen.path] = media_duration_seconds(chosen.path)
+    latest = max(0.0, durations[chosen.path] - _END_GUARD_SECONDS)
+    offset = (when - chosen.origin).total_seconds()
+    return chosen.path, min(max(0.0, offset), latest)
 
 
 def _cut(source: Path, offset: float, duration: float, dest: Path, *, with_audio: bool) -> None:
+    # `-ss` before `-i` seeks the input instead of decoding from the start.
     command = [
         "ffmpeg",
         "-y",
         "-nostdin",
         "-v",
         "error",
-        "-i",
-        str(source),
         "-ss",
         f"{offset:.3f}",
+        "-i",
+        str(source),
         "-t",
         f"{duration:.3f}",
         "-c:v",
@@ -244,18 +305,21 @@ def _cut(source: Path, offset: float, duration: float, dest: Path, *, with_audio
     else:
         command.append("-an")
     command.append(str(dest))
-    _ffmpeg(command)
+    # Re-encoding runs at roughly real time on a slow machine. Allow plenty.
+    _ffmpeg(command, timeout=max(120.0, duration * 10))
 
 
-def _ffmpeg(command: list[str]) -> None:
+def _ffmpeg(command: list[str], timeout: float = 120.0) -> None:
     try:
-        result = subprocess.run(command, check=False, capture_output=True, timeout=120)
+        result = subprocess.run(command, check=False, capture_output=True, timeout=timeout)
     except FileNotFoundError as exc:
         raise FfmpegMissingError(
             "ffmpeg is not on PATH, so no footage was exported. "
             "Install ffmpeg (macOS: `brew install ffmpeg`, "
             "Debian/Ubuntu: `sudo apt install ffmpeg`)."
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AudioError(f"ffmpeg took longer than {timeout:g} seconds") from exc
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise AudioError(f"ffmpeg failed: {detail or 'unknown error'}")

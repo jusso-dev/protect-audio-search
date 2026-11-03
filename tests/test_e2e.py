@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 import wave
 from datetime import UTC, datetime, timedelta
@@ -52,6 +53,7 @@ def _scan(tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch) -> list[st
         event_config=EventConfig(),
         command=sys.executable,
         args=[str(SERVER)],
+        env=dict(os.environ),
     )
     assert scanned.chunks
     return [event.peak_class for event in scanned.events]

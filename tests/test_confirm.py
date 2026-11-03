@@ -109,7 +109,7 @@ def test_confirm_off_does_not_build_a_provider_or_open_a_socket(
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
     monkeypatch.setattr(
         "protect_audio_search.cli.run_scan",
-        lambda **_kwargs: ScanOutput(events=[_event()], chunks=[]),
+        lambda **_kwargs: ScanOutput(scored=1, events=[_event()], chunks=[]),
     )
     json_path = tmp_path / "out.json"
     main(
@@ -141,7 +141,7 @@ def test_confirm_puts_hint_in_the_table_and_json(
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
     monkeypatch.setattr(
         "protect_audio_search.cli.run_scan",
-        lambda **_kwargs: ScanOutput(events=[_event()], chunks=[]),
+        lambda **_kwargs: ScanOutput(scored=1, events=[_event()], chunks=[]),
     )
     monkeypatch.setattr(
         "protect_audio_search.cli.capture_events",
@@ -187,7 +187,7 @@ def test_malformed_provider_reply_does_not_crash(
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
     monkeypatch.setattr(
         "protect_audio_search.cli.run_scan",
-        lambda **_kwargs: ScanOutput(events=[_event()], chunks=[]),
+        lambda **_kwargs: ScanOutput(scored=1, events=[_event()], chunks=[]),
     )
     monkeypatch.setattr(
         "protect_audio_search.cli.capture_events",
@@ -227,7 +227,7 @@ def test_missing_key_exits_and_a_set_key_is_not_printed(
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
     monkeypatch.setattr(
         "protect_audio_search.cli.run_scan",
-        lambda **_kwargs: ScanOutput(events=[_event()], chunks=[]),
+        lambda **_kwargs: ScanOutput(scored=1, events=[_event()], chunks=[]),
     )
     monkeypatch.setattr(
         "protect_audio_search.cli.capture_events",

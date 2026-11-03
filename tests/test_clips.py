@@ -128,7 +128,7 @@ def test_cli_puts_clip_and_snapshot_paths_in_json_and_csv(
     event = _event(8, 12)
 
     def fake_scan(**_kwargs: object) -> ScanOutput:
-        return ScanOutput(events=[event], chunks=chunks)
+        return ScanOutput(scored=1, events=[event], chunks=chunks)
 
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
     monkeypatch.setattr("protect_audio_search.cli.run_scan", fake_scan)

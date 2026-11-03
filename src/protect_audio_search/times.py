@@ -27,8 +27,27 @@ def parse_user_time(text: str, tz: ZoneInfo) -> datetime:
             f"Could not parse time {text!r}. Use 'YYYY-MM-DD HH:MM' or an ISO 8601 value."
         ) from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=tz)
-    return parsed.astimezone(ZoneInfo("UTC"))
+        parsed = _localise(parsed, tz, text)
+    # Exports and chunk names work in whole seconds.
+    return parsed.astimezone(ZoneInfo("UTC")).replace(microsecond=0)
+
+
+def _localise(naive: datetime, tz: ZoneInfo, text: str) -> datetime:
+    """Attach `tz`, refusing a clock time that is skipped or repeated by a DST change."""
+    first = naive.replace(tzinfo=tz, fold=0)
+    second = naive.replace(tzinfo=tz, fold=1)
+    round_trip = first.astimezone(ZoneInfo("UTC")).astimezone(tz).replace(tzinfo=None)
+    if round_trip != naive:
+        raise ValueError(
+            f"{text!r} does not exist in {tz.key}: the clocks skip it for daylight saving. "
+            "Pass a time with an offset, for example 2026-10-04T03:30+11:00."
+        )
+    if first.utcoffset() != second.utcoffset():
+        raise ValueError(
+            f"{text!r} happens twice in {tz.key} when daylight saving ends. "
+            "Pass a time with an offset, for example 2026-04-05T02:30+11:00."
+        )
+    return first
 
 
 def format_zoned(value: datetime, tz: ZoneInfo) -> str:
