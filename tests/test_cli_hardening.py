@@ -153,6 +153,22 @@ def test_failed_scan_keeps_chunks_and_reports_the_cause(
     assert json.loads((tmp_path / "result.json").read_text())["run"]["chunks_failed"]
 
 
+def test_partial_scan_writes_results_and_exits_three(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    start = datetime(2026, 10, 20, 10, tzinfo=UTC)
+    failure = FailedChunk(start, start + timedelta(minutes=10), "export failed")
+    monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
+    monkeypatch.setattr(
+        "protect_audio_search.cli.run_scan",
+        lambda **_kwargs: ScanOutput(events=[], chunks=[], failed=[failure], scored=1, planned=2),
+    )
+    with pytest.raises(SystemExit) as caught:
+        main([*BASE, "--json", str(tmp_path / "result.json")])
+    assert caught.value.code == 3
+    assert json.loads((tmp_path / "result.json").read_text())["run"]["chunks_failed"]
+
+
 def _mock_command(tmp_path: Path, **settings: str) -> str:
     config = tmp_path / "mock.json"
     config.write_text(

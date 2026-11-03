@@ -110,7 +110,11 @@ def _capture_one(
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 raise AudioError(f"Review file already exists: {dest}")
-            _write_clip(segments, dest)
+            try:
+                _write_clip(segments, dest)
+            except AudioError:
+                dest.unlink(missing_ok=True)
+                raise
             clip = dest
         except FfmpegMissingError:
             raise

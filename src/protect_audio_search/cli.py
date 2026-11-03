@@ -420,6 +420,9 @@ def _scan(args: argparse.Namespace) -> None:
         )
     if scanned.scored == 0:
         _no_audio(bool(scanned.failed))
+    if scanned.failed:
+        print("Scan incomplete: one or more chunks failed or were not attempted.", file=sys.stderr)
+        raise SystemExit(3)
 
 
 def _validate_scan_args(args: argparse.Namespace) -> None:

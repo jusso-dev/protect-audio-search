@@ -197,6 +197,70 @@ def test_auth_error_stops_future_exports_but_keeps_partial_results(tmp_path: Pat
     assert "Not attempted" in failures[-1].error
 
 
+def test_cached_later_chunks_are_scored_after_auth_failure(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    common = dict(
+        camera="Street",
+        output_dir=tmp_path / "chunks",
+        command=sys.executable,
+        args=[str(SERVER)],
+        retry_backoff_seconds=0,
+    )
+    asyncio.run(
+        export_footage(
+            start=START + timedelta(minutes=20),
+            end=START + timedelta(minutes=40),
+            env=env,
+            **common,
+        )
+    )
+    failures: list[FailedChunk] = []
+    ready: list[FootageChunk] = []
+    env["MOCK_FAIL_STARTS"] = (START + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    env["MOCK_FAIL_STATUS"] = "401"
+    chunks = asyncio.run(
+        export_footage(
+            start=START,
+            end=START + timedelta(minutes=40),
+            env=env,
+            on_failure=failures.append,
+            on_chunk=ready.append,
+            **common,
+        )
+    )
+    assert [chunk.start for chunk in chunks] == [
+        START,
+        START + timedelta(minutes=20),
+        START + timedelta(minutes=30),
+    ]
+    assert ready == chunks
+    assert len(failures) == 1
+    assert len(_calls(tmp_path)) == 4
+
+
+def test_local_save_error_keeps_prior_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from protect_audio_search import footage
+
+    original = footage._place_chunk
+    calls = 0
+
+    def fail_second(*args: object, **kwargs: object) -> FootageChunk:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError(28, "No space left on device")
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(footage, "_place_chunk", fail_second)
+    failures: list[FailedChunk] = []
+    chunks = _export(tmp_path, _env(tmp_path), on_failure=failures.append)
+    assert len(chunks) == 1
+    assert len(failures) == 1
+    assert "No space left on device" in failures[0].error
+
+
 def test_channel_changes_do_not_reuse_other_channel(tmp_path: Path) -> None:
     first = _export(tmp_path, _env(tmp_path), channel=2)
     second = _export(tmp_path, _env(tmp_path), channel=0)
@@ -248,6 +312,16 @@ def test_request_timeout_is_not_retried() -> None:
     with pytest.raises(ToolFailed) as caught:
         asyncio.run(_call_tool(TimingOut(), "unifi_protect_export_video", {}))  # type: ignore[arg-type]
     assert not caught.value.transient
+
+
+def test_server_error_with_timed_out_text_is_not_a_client_timeout() -> None:
+    class ServerError:
+        async def call_tool(self, _name: str, _arguments: dict[str, object]) -> object:
+            raise MCPError(code=-32603, message="upstream timed out")
+
+    with pytest.raises(ProtectClientError, match="upstream timed out") as caught:
+        asyncio.run(_call_tool(ServerError(), "unifi_protect_export_video", {}))  # type: ignore[arg-type]
+    assert not isinstance(caught.value, ToolFailed)
 
 
 def test_transient_status_comes_from_the_error_details() -> None:

@@ -301,6 +301,21 @@ def test_capture_does_not_overwrite_existing_clip(tmp_path: Path) -> None:
     assert media[0].error and "already exists" in media[0].error
 
 
+def test_failed_clip_removes_partial_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _video(tmp_path / "a.mp4", 10)
+    chunk = FootageChunk(tmp_path / "a.mp4", T0, T0 + timedelta(seconds=10), False)
+    from protect_audio_search.audio import AudioError
+
+    def fail(_segments: object, dest: Path) -> None:
+        dest.write_bytes(b"partial")
+        raise AudioError("clip failed")
+
+    monkeypatch.setattr("protect_audio_search.clips._write_clip", fail)
+    media = capture_events([_event(1, 3)], [chunk], run_dir=tmp_path / "run", write_clips=True)
+    assert media[0].error and "clip failed" in media[0].error
+    assert not (tmp_path / "run" / "clips" / "0001.mp4").exists()
+
+
 def test_partial_snapshot_failure_keeps_successes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

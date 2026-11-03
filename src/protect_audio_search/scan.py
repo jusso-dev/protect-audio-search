@@ -158,7 +158,6 @@ def run_scan(
             # `load_chunk_audio` has already logged a warning naming the chunk.
             silent.append(chunk)
             return
-        scored += 1
         span = (chunk.end - chunk.start).total_seconds()
         heard = np.asarray(waveform).size / SAMPLE_RATE
         if heard < span - SHORT_AUDIO_TOLERANCE_SECONDS:
@@ -174,6 +173,7 @@ def run_scan(
             if when < chunk.start or when >= chunk.end:
                 continue
             frames.append(ScoreFrame(time=when, scores=frame.scores))
+        scored += 1
 
     if exporter is None:
         asyncio.run(

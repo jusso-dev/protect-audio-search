@@ -8,6 +8,7 @@ child gets an allowlisted copy of the environment, not all of it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -401,6 +402,21 @@ async def export_footage(
                     "historical footage may still contain sound."
                 )
             exported: list[FootageChunk] = []
+            stop_reason: str | None = None
+
+            def accept(chunk: FootageChunk) -> None:
+                nonlocal stop_reason
+                exported.append(chunk)
+                if on_chunk is None:
+                    return
+                try:
+                    on_chunk(chunk)
+                except OSError as exc:
+                    if on_failure is None:
+                        raise
+                    stop_reason = redact(f"Local chunk processing failed: {exc}")
+                    on_failure(FailedChunk(chunk.start, chunk.end, stop_reason))
+
             for index, (chunk_start, chunk_end) in enumerate(ranges, start=1):
                 pending = [(chunk_start, chunk_end)]
                 while pending:
@@ -417,16 +433,18 @@ async def export_footage(
                             for part in parts:
                                 if progress is not None:
                                     progress(index, len(ranges), part.start, part.end, True)
-                                exported.append(part)
-                                if on_chunk is not None:
-                                    on_chunk(part)
+                                accept(part)
                             continue
+                    if cached is None and stop_reason is not None:
+                        assert on_failure is not None
+                        on_failure(
+                            FailedChunk(part_start, part_end, "Not attempted: " + stop_reason)
+                        )
+                        continue
                     if progress is not None:
                         progress(index, len(ranges), part_start, part_end, cached is not None)
                     if cached is not None:
-                        exported.append(cached)
-                        if on_chunk is not None:
-                            on_chunk(cached)
+                        accept(cached)
                         continue
                     try:
                         info = await _export_with_retry(
@@ -442,18 +460,9 @@ async def export_footage(
                         )
                     except ProtectClientError as exc:
                         if isinstance(exc, ExportStopped) and on_failure is not None:
-                            on_failure(FailedChunk(part_start, part_end, redact(str(exc))))
-                            unattempted = pending + ranges[index:]
-                            for missing_start, missing_end in unattempted:
-                                on_failure(
-                                    FailedChunk(
-                                        missing_start,
-                                        missing_end,
-                                        "Not attempted after an export stopped: "
-                                        + redact(str(exc)),
-                                    )
-                                )
-                            return exported
+                            stop_reason = redact(str(exc))
+                            on_failure(FailedChunk(part_start, part_end, stop_reason))
+                            continue
                         halves = _split_for_limit(str(exc), part_start, part_end)
                         if halves:
                             pending[:0] = halves
@@ -462,10 +471,17 @@ async def export_footage(
                             raise
                         on_failure(FailedChunk(part_start, part_end, redact(str(exc))))
                         continue
-                    chunk = _place_chunk(info, dest, part_start, part_end)
-                    exported.append(chunk)
-                    if on_chunk is not None:
-                        on_chunk(chunk)
+                    try:
+                        chunk = _place_chunk(info, dest, part_start, part_end)
+                    except OSError as exc:
+                        if on_failure is None:
+                            raise
+                        with contextlib.suppress(OSError):
+                            info.path.unlink(missing_ok=True)
+                        stop_reason = redact(f"Could not save footage: {exc}")
+                        on_failure(FailedChunk(part_start, part_end, stop_reason))
+                        continue
+                    accept(chunk)
             return exported
     except ProtectClientError:
         raise
@@ -685,7 +701,7 @@ async def _call_tool(session: ClientSession, name: str, arguments: dict[str, Any
     try:
         result = await session.call_tool(name, arguments)
     except MCPError as exc:
-        if exc.code == _REQUEST_TIMEOUT or "timed out" in exc.message:
+        if exc.code == _REQUEST_TIMEOUT:
             # The server may ignore cancellation and continue writing the requested path.
             # Retrying immediately could make two exports write the same file.
             raise ToolFailed(f"Tool {name} timed out", transient=False, timed_out=True) from exc

@@ -100,11 +100,11 @@ protect-audio-search scan \
 
 `--camera` is a Protect name (case-insensitive, must be unique) or a camera id. The label stored on each event is the string you passed.
 
-Exit status is 0 when the scan finishes, including when nothing matched. Stdout then says `No events.` If no chunk had any audio to score, the run writes its results and then exits 1, because an empty result would otherwise read as "nothing happened". A bad argument exits 2, before anything is exported. A failure talking to Protect, ffmpeg, the model cache, or a file write exits 1. Ctrl-C exits 130 and keeps the exported chunks. Error messages are redacted, but the child MCP process can still write its own errors to stderr.
+Exit status is 0 when the scan finishes without failed chunks, including when nothing matched. Stdout then says `No events.` If some audio was scored but a chunk failed or was not attempted, the scan writes partial results and exits 3. If no chunk had audio to score, it writes its results and exits 1, because an empty result would otherwise read as "nothing happened". A bad argument exits 2, before anything is exported. A fatal failure talking to Protect, ffmpeg, the model cache, or a file write exits 1. Ctrl-C exits 130 and keeps the exported chunks. Error messages are redacted, but the child MCP process can still write its own errors to stderr.
 
 Progress is on stderr, in `--tz`. `export 3/30` is printed before each download, `cached 3/30` for a chunk already on disk, and `chunk 3/30` when that chunk is scored. Each chunk is scored as soon as it lands. At the end a line says how many chunks were scored, how many had no audio, and how many failed.
 
-A chunk that cannot be exported (no recording in that window, say) or decoded is reported and skipped, and the scan carries on. Authentication errors, second-factor requests and client timeouts stop further exports; already-scored results are kept and the unattempted range is listed as failed. The JSON `run` block lists every skipped chunk. Run the same command again to retry them.
+A chunk that cannot be exported (no recording in that window, say) or decoded is reported and skipped, and the scan carries on. Authentication errors, second-factor requests and client timeouts stop further downloads; cached chunks are still scored, and unattempted ranges are listed as failed. The JSON `run` block lists every skipped chunk. Run the same command again to retry them.
 
 Footage chunks land in `--output-dir` (default `exports`):
 
