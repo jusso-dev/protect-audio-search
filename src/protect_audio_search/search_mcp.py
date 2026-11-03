@@ -245,18 +245,10 @@ def search_audio_events(
     start: str,
     end: str,
     tz: str = DEFAULT_TIMEZONE,
-    output_dir: str = "exports",
 ) -> dict[str, object]:
     """Start one on-demand scan. Returns a job and does not wait for the export."""
-    return _tool_call(
-        lambda: STORE.start(
-            camera=camera,
-            start=start,
-            end=end,
-            tz_name=tz,
-            output_dir=output_dir,
-        )
-    )
+    # No output directory argument: a tool caller must not choose where footage lands.
+    return _tool_call(lambda: STORE.start(camera=camera, start=start, end=end, tz_name=tz))
 
 
 @mcp.tool(name="search_audio_events_status")

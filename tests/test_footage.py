@@ -81,7 +81,8 @@ def test_export_calls_three_chunks_with_utc_boundaries(tmp_path: Path) -> None:
     for chunk in chunks:
         assert chunk.path.is_file()
         assert chunk.path.stat().st_size > 0
-        assert chunk.path.parent.name == "cam-1"
+        assert chunk.path.parent.name == "channel-0"
+        assert chunk.path.parent.parent.name == "cam-1"
 
 
 def test_rerun_skips_existing_chunk_files(tmp_path: Path) -> None:

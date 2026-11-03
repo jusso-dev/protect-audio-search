@@ -34,7 +34,7 @@ def _quiet(
     assert event_config.threshold == 0.3
     progress(1, 2, start, end)
     progress(2, 2, start, end)
-    return ScanOutput(events=[], chunks=[])
+    return ScanOutput(scored=1, events=[], chunks=[])
 
 
 def test_finished_job_matches_scan_schema() -> None:
@@ -48,7 +48,7 @@ def test_finished_job_matches_scan_schema() -> None:
     body = store.result(str(status["job_id"]))
     scan = body["scan"]
     assert isinstance(scan, dict)
-    assert scan["schema_version"] == 1
+    assert scan["schema_version"] == 2
     assert scan["camera"] == "Street"
     assert scan["timezone"] == "Australia/Sydney"
     assert scan["start_utc"] == "2026-10-20T10:00:00Z"
@@ -73,7 +73,7 @@ def test_export_phase_blocks_a_second_scan() -> None:
         del camera, start, end, output_dir, event_config, chunk_minutes, progress
         started.set()
         assert release.wait(timeout=5)
-        return ScanOutput(events=[], chunks=[])
+        return ScanOutput(scored=1, events=[], chunks=[])
 
     store = JobStore(runner=runner)
     status = store.start(camera="Street", start=START, end=END)
@@ -111,7 +111,7 @@ def test_failure_is_redacted_and_does_not_block_the_next_job() -> None:
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("password=hunter2")
-        return ScanOutput(events=[], chunks=[])
+        return ScanOutput(scored=1, events=[], chunks=[])
 
     store = JobStore(runner=runner)
     failed = store.start(camera="Street", start=START, end="2026-10-20 21:10", wait=True)

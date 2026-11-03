@@ -120,6 +120,38 @@ def test_padding_is_clamped_to_available_footage(tmp_path: Path) -> None:
     assert len(media[0].snapshots) == 1
 
 
+def test_cli_rerun_preserves_previous_clips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    chunks = _chunks(tmp_path / "footage")
+    event = _event(8, 12)
+    monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
+    monkeypatch.setattr(
+        "protect_audio_search.cli.run_scan",
+        lambda **_kwargs: ScanOutput(scored=2, events=[event], chunks=chunks),
+    )
+    base = [
+        "scan",
+        "--camera",
+        "Street",
+        "--from",
+        "2026-10-20T10:00:00Z",
+        "--to",
+        "2026-10-20T10:00:20Z",
+        "--output-dir",
+        str(tmp_path / "exports"),
+    ]
+    main([*base, "--clips"])
+    first = list((tmp_path / "exports").rglob("0001.mp4"))
+    assert len(first) == 1
+    original = first[0].read_bytes()
+    main([*base, "--snapshots", "1"])
+    assert first[0].read_bytes() == original
+    snapshots = list((tmp_path / "exports").rglob("0001-01.jpg"))
+    assert len(snapshots) == 1
+    assert snapshots[0].parent.parent != first[0].parent.parent
+
+
 def test_cli_puts_clip_and_snapshot_paths_in_json_and_csv(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -128,7 +160,7 @@ def test_cli_puts_clip_and_snapshot_paths_in_json_and_csv(
     event = _event(8, 12)
 
     def fake_scan(**_kwargs: object) -> ScanOutput:
-        return ScanOutput(events=[event], chunks=chunks)
+        return ScanOutput(scored=1, events=[event], chunks=chunks)
 
     monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
     monkeypatch.setattr("protect_audio_search.cli.run_scan", fake_scan)

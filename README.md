@@ -12,7 +12,7 @@ You need:
 
 - Python 3.11 or newer
 - `ffmpeg` and `ffprobe` on `PATH` (a real scan, clips and snapshots)
-- Node.js with `npx` on `PATH` (the default Protect client launches `npx -y @mgcrea/mcp-unifi-protect`)
+- Node.js with `npx` on `PATH` (the default Protect client launches `npx -y @mgcrea/mcp-unifi-protect@1.1.0`, pinned)
 
 On macOS, Homebrew can install all three: `brew install python@3.11 ffmpeg node`. On Debian or Ubuntu: `sudo apt-get update && sudo apt-get install -y python3 python3-venv ffmpeg`, plus a Node.js install that provides `npx`.
 
@@ -28,7 +28,7 @@ pip install -e .
 
 The first real scan downloads the YAMNet model and class map into `$XDG_CACHE_HOME/protect-audio-search`, or `~/.cache/protect-audio-search` when `XDG_CACHE_HOME` is unset. Both files are checked against pinned SHA-256 hashes. A mismatch stops the run. Model files are not in git.
 
-`--dry-run` and `classes` do not need ffmpeg, Node, credentials, or that download.
+`--dry-run` and `classes` do not need ffmpeg, Node, credentials, or that download. `protect-audio-search --version` prints the version.
 
 ## First scan
 
@@ -58,7 +58,7 @@ An aware timestamp also works: `--from 2026-10-20T10:00:00Z`.
 
 ### 3. Point the MCP server at your console
 
-This program does not read a UniFi password. It starts [mgcrea/mcp-unifi-protect](https://github.com/mgcrea/mcp-unifi-protect) and passes through the current environment. Set variables in that environment. Do not commit them, and do not paste real values into this repository.
+This program does not read a UniFi password. It starts [mgcrea/mcp-unifi-protect](https://github.com/mgcrea/mcp-unifi-protect) and passes it an allowlisted copy of the current environment: `UNIFI_PROTECT_*`, `PATH`, `HOME`, locale, proxy, certificate, and Node or npm settings. Other variables, including `ANTHROPIC_API_KEY`, are not passed. Set variables in that environment. Do not commit them, and do not paste real values into this repository.
 
 Local console (the usual case), names only:
 
@@ -79,6 +79,14 @@ protect-audio-search cameras
 
 Each line is `id`, then a tab, then the name. An empty console prints `No cameras.`
 
+Before a long scan, check the whole chain without exporting anything:
+
+```bash
+protect-audio-search check --camera "Street"
+```
+
+It checks ffmpeg, downloads and hash-checks the model, starts the MCP server, logs in, and asks Protect whether the camera currently keeps audio in its recordings. If audio is off, it prints a note; older recordings may still have sound. If the server lists only its auth tool, the message names the variables to set.
+
 ### 4. Run a scan
 
 ```bash
@@ -92,15 +100,23 @@ protect-audio-search scan \
 
 `--camera` is a Protect name (case-insensitive, must be unique) or a camera id. The label stored on each event is the string you passed.
 
-Exit status is 0 when the scan finishes, including when nothing matched. Stdout then says `No events.` Progress is on stderr, in `--tz`. A bad argument exits 2. A failure talking to Protect, ffmpeg, the model cache, or vision confirmation exits 1. Those messages are redacted, but the child MCP process can still write its own errors to stderr.
+Exit status is 0 when the scan finishes without failed chunks, including when nothing matched. Stdout then says `No events.` If some audio was scored but a chunk failed or was not attempted, the scan writes partial results and exits 3. If no chunk had audio to score, it writes its results and exits 1, because an empty result would otherwise read as "nothing happened". A bad argument exits 2, before anything is exported. A fatal failure talking to Protect, ffmpeg, the model cache, or a file write exits 1. Ctrl-C exits 130 and keeps the exported chunks. Error messages are redacted, but the child MCP process can still write its own errors to stderr.
+
+Progress is on stderr, in `--tz`. `export 3/30` is printed before each download, `cached 3/30` for a chunk already on disk, and `chunk 3/30` when that chunk is scored. Each chunk is scored as soon as it lands. At the end a line says how many chunks were scored, how many had no audio, and how many failed.
+
+A chunk that cannot be exported (no recording in that window, say) or decoded is reported and skipped, and the scan carries on. Authentication errors, second-factor requests and client timeouts stop further downloads; cached chunks are still scored, and unattempted ranges are listed as failed. The JSON `run` block lists every skipped chunk. Run the same command again to retry them.
 
 Footage chunks land in `--output-dir` (default `exports`):
 
 ```text
-exports/<camera-id>/20261020T100000Z_20261020T101000Z.mp4
+exports/<camera-id>/channel-0/20261020T100000Z_20261020T101000Z.mp4
 ```
 
-An existing non-empty chunk file is skipped, so a rerun can resume.
+An existing non-empty chunk file for the same camera, channel and range is skipped, so a rerun can resume. Each export has a unique partial path through `savePath`, and the file is renamed into place when complete, so no second copy is left in the server's own cache (`~/.cache/unifi-protect`). A `.json` file next to each chunk keeps the export's real start time for a resumed run. A timed-out server may still write a partial file later; check the export folder before removing it.
+
+The Protect export starts on the keyframe before the requested time, up to a second or so early. Event times use the export's reported `startsAt`, and the lead-in is not scored twice.
+
+The MCP server refuses a download over `UNIFI_PROTECT_MAX_DOWNLOAD_BYTES` (200 MB by default). Full-quality footage can pass that in ten minutes. A chunk over the limit is split in half and retried, down to one-minute pieces. To keep downloads smaller from the start, pass `--channel 1` or `--channel 2` (lower bitrate, same audio, softer snapshots) or a shorter `--chunk-minutes`.
 
 Add review files when you want to look as well as listen:
 
@@ -116,11 +132,17 @@ protect-audio-search scan \
 For a Sydney start of `2026-10-20 21:00`, clips and snapshots go under:
 
 ```text
-exports/20261020T100000Z-Street/clips/0001.mp4
-exports/20261020T100000Z-Street/snapshots/0001-01.jpg
+exports/20261020T100000Z-Street/run-<unique>/clips/0001.mp4
+exports/20261020T100000Z-Street/run-<unique>/snapshots/0001-01.jpg
 ```
 
-The folder stamp is the range start in UTC. `--clip-padding` defaults to 5 seconds around the event. Snapshots are spaced across the event itself, not the padding. `--cleanup-chunks` deletes the exported footage files after those review files are written, and leaves the review folder.
+The folder stamp is the range start in UTC. File numbers match the `#` column in the table and `number` in the JSON. The run folder also gets a `results.json`, and its full path is printed at the end. Each run gets a new folder, preserving earlier review files. `--clip-padding` defaults to 5 seconds around the event. Snapshots are spaced across the event itself, not the padding. A clip or snapshot that cannot be written is reported on that event (`media_error`) and the others carry on.
+
+`--cleanup-chunks` deletes exported footage after results and review files are written when processing is complete. Failed, silent or short chunks and review-media errors cause the footage to be retained for recovery. An interrupted run also keeps its chunks.
+
+Files the scan creates (chunks, clips, snapshots, results) are readable only by your user.
+
+For the first long run, follow [docs/real-scan-checklist.md](docs/real-scan-checklist.md).
 
 ## Configuration
 
@@ -132,6 +154,7 @@ Variables this package reads:
 | `ANTHROPIC_MODEL` | Optional. Default `claude-haiku-5-5`. |
 | `XDG_CACHE_HOME` | Optional. Model cache directory. |
 | `PROTECT_AUDIO_SEARCH_OFFLINE` | Set to `1` to refuse a download. A file already in the cache is still hash-checked. |
+| `PROTECT_AUDIO_SEARCH_MCP_COMMAND` | Optional. Replaces `npx -y @mgcrea/mcp-unifi-protect@1.1.0`, for example with a locally installed server. Split like a shell command line. |
 
 UniFi variables are listed under the first-scan step above. They belong to the MCP server.
 
@@ -156,24 +179,26 @@ protect-audio-search scan \
 - Too many hits (motorbikes, trucks, leaf blowers, loud music): raise `--threshold`, or raise one class with `--class-threshold NAME=SCORE`. Raising a threshold does not add events.
 - Missed sounds you can hear: lower that class. If the sound is shorter than `--min-duration`, lower that too.
 - `--smooth-frames` is a trailing moving average. `1` is off. A longer average hides one-frame spikes and can also hide a short squeal.
-- `--gap` joins frames that sit at most that many seconds apart. A larger gap means fewer, longer events. Chunks join the same way, by absolute time.
+- `--gap` joins frames whose window starts sit at most that many seconds apart. A larger gap means fewer, longer events. Chunks join the same way, by absolute time. A gap below the `0.48` second hop splits every frame into its own event.
 - Tune per camera. A camera on a road is not a camera in a driveway.
-- The name in `--class-threshold` must be the AudioSet display name. `Tire squeal` uses the American spelling from AudioSet. An unknown name exits with a few close matches.
+- The name in `--class-threshold` must be one of the target display names below. `Tire squeal` uses the American spelling from AudioSet. Any other name exits 2 with close matches. A context class name exits 2 too, because it is never a hit.
+- Thresholds are between 0 and 1.
+- To tune without exporting again, rerun the same range with new settings. Cached chunks are reused, and scoring runs far faster than real time. The JSON `run.settings` block records the settings for each run so results can be compared. This needs the chunks, so leave out `--cleanup-chunks` until the settings are right.
 - Context classes such as `Vehicle` often score above `0.8` while `Engine` on the same window is much lower. A scan does not treat the global top class as the hit. The peak on an event is the highest smoothed score among target classes that passed their own threshold.
 
 There is no flag to turn a context class into a hit.
 
 ## What a scan does
 
-1. Check that `ffmpeg` is installed (skipped for `--dry-run`).
-2. Start `npx -y @mgcrea/mcp-unifi-protect` over stdio. The launch command is not a CLI flag.
-3. Resolve `--camera`, then export the range in chunks (default 10 minutes, last chunk shorter). Transient export errors retry. A permanent error fails that chunk once.
-4. Extract 16 kHz mono audio. A chunk with no audio stream is skipped, with a warning on stderr.
-5. Score each window with the TFLite YAMNet model. `WindowScorer` is a small interface so another backend could be added later. No ONNX backend ships.
-6. Merge target-class frames into events.
-7. Optionally write clips and snapshots, optionally send snapshots to Anthropic, then optionally delete the footage chunks.
+1. Validate every flag, check that `ffmpeg` is installed, load and hash-check the model, and, with `--confirm`, check `ANTHROPIC_API_KEY`. Nothing is exported until these pass.
+2. Start `npx -y @mgcrea/mcp-unifi-protect@1.1.0` over stdio (or `PROTECT_AUDIO_SEARCH_MCP_COMMAND`).
+3. Resolve `--camera` and warn if its current settings say it does not record audio; older recordings may still contain sound.
+4. Export the range in chunks (default 10 minutes, last chunk shorter). Transient server errors (429, 5xx) retry with backoff. Client timeouts are not retried immediately because the server may still be writing. A chunk over the download cap is split. Another error skips that chunk.
+5. As each chunk lands, extract 16 kHz mono audio and score each window with the TFLite YAMNet model. A chunk with no audio stream is skipped, with a warning. The last partial window of a chunk is scored too. `WindowScorer` is a small interface so another backend could be added later. No ONNX backend ships.
+6. Merge target-class frames into events. Smoothing does not average across a gap in the audio.
+7. Optionally write clips and snapshots, optionally send snapshots to Anthropic, write the results, then optionally delete the footage chunks.
 
-JSON (`--json`) follows [docs/scan-result.schema.json](docs/scan-result.schema.json) (`schema_version` 1). The file has `start_utc` and `end_utc`. Each event's `start` and `end` are in `--tz` with a numeric offset. `confirmation` is `null` when `--confirm` is off. CSV (`--csv`) always includes the confirmation columns, empty when confirmation is off. The terminal table is plain aligned text.
+JSON (`--json`) follows [docs/scan-result.schema.json](docs/scan-result.schema.json) (`schema_version` 2). The file has `start_utc`, `end_utc`, `tool_version`, and a `run` block with the settings, chunk counts, and the chunks that had no audio, failed, or had less audio than their range. Each event's `start` and `end` are in `--tz` with a numeric offset. `confirmation` is `null` when `--confirm` is off. CSV (`--csv`) always includes the confirmation columns, empty when confirmation is off. A cell that starts with `=`, `+`, `-`, or `@` gets a leading `'` so a spreadsheet does not run it as a formula. The terminal table is plain aligned text.
 
 ## Classes
 
@@ -200,8 +225,10 @@ Context names, printed by `classes` and not used as hits: `Vehicle` (294), `Moto
 
 - **It only hears the camera.** Many cameras have no microphone, or the microphone is disabled. Distance, wind, rain and walls all hurt accuracy.
 - **YAMNet is a general model.** It was not trained to find hoon driving. Expect false positives and missed events. The quantised model often ranks `Vehicle` above `Engine` even on revving. Thresholds need tuning per camera.
-- **Exports are slow and large.** Hours of footage take time and disk. A five hour range at the default chunk size is thirty downloads.
+- **Exports are slow and large.** Hours of footage take time and disk. A five hour range at the default chunk size is thirty downloads, up to 200 MB each at full quality.
+- **Recording gaps.** A chunk with less audio than its range (motion-only recording, say) is flagged in `run.chunks_short_audio`. Times inside it are approximate, because the server reports the start as the end minus the file's length.
 - **Private API.** The MCP server wraps Protect's private API, which can change between Protect releases.
+- **Times are whole seconds.** `--from` and `--to` drop fractions of a second. A clock time that daylight saving skips or repeats is refused. Pass an offset instead.
 - **Plates are hints.** Night snapshots and the vision check are not evidence. A plate string can be wrong.
 - **TFLite only.** ONNX is not implemented.
 - **One-time download.** A real scan needs network access the first time, unless the cache is already warm. `PROTECT_AUDIO_SEARCH_OFFLINE=1` with an empty cache fails instead of downloading.
@@ -230,7 +257,7 @@ Practical limits this tool can keep:
 
 - Footage, clips and snapshots stay on this machine unless you turn on `--confirm`.
 - `--confirm` sends images to Anthropic. Read [docs/vision-confirmation.md](docs/vision-confirmation.md) and [anthropic.com](https://www.anthropic.com/) before you do that.
-- Delete footage when you no longer need it. `--cleanup-chunks` removes exported chunks and leaves the review folder. It does not decide your retention period.
+- Delete footage when you no longer need it. `--cleanup-chunks` removes exported chunks and leaves the review folder. It does not decide your retention period. Footage exported by other tools through the same MCP server may still sit in its `UNIFI_PROTECT_SNAPSHOT_DIR` (default `~/.cache/unifi-protect`). This tool does not write there.
 - Prefer a view-only Protect account used only for this tool.
 - Do not commit `.env`, footage, or model files.
 

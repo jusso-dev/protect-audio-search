@@ -14,4 +14,6 @@ The API key is read from `ANTHROPIC_API_KEY`. An optional model id is read from 
 
 ## Caps
 
-Defaults: 3 images per event, 20 calls, and USD 0.50 estimated cost. The estimate uses the published Claude Haiku 5.5 short-prompt rates: USD 0.10 per million input tokens and USD 0.50 per million output tokens. It is not an invoice. A run stops calling once the call cap or the cost cap is reached, and prints a summary of calls, images, estimated cost, and skipped events.
+Defaults: 3 images per event, 20 calls, and USD 0.50 estimated cost. The estimate uses the published Claude Haiku 5.5 rates for prompts up to 100K tokens: USD 0.10 per million input tokens and USD 0.50 per million output tokens. It is not an invoice. Requests ask for low effort, so Haiku 5.5 thinks briefly before it answers. A run stops calling once the call cap or the cost cap is reached, and prints a summary of calls, images, estimated cost, skipped events, and failed calls.
+
+A failed call (a network error, an API error, or a declined request) is recorded on that event as a note, and the other events are still checked. The scan result is kept either way.

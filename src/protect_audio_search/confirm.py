@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,10 @@ DEFAULT_MAX_COST_USD = 0.50
 # Short-prompt Haiku 5.5 rates, USD per token. Not a bill.
 _INPUT_USD_PER_TOKEN = 0.10 / 1_000_000
 _OUTPUT_USD_PER_TOKEN = 0.50 / 1_000_000
+
+_MAX_PLATE_CHARS = 16
+_MAX_NOTE_CHARS = 300
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
 
 _PROMPT = (
     "Look at these camera frames. Reply with one JSON object and no other text. "
@@ -57,14 +63,18 @@ class ConfirmSummary:
     images: int
     estimated_usd: float
     skipped: int
+    failed: int = 0
 
     def render(self) -> str:
-        return (
+        text = (
             f"Vision calls: {self.calls}. "
             f"Images sent: {self.images}. "
             f"Estimated cost: USD {self.estimated_usd:.4f}. "
             f"Skipped: {self.skipped}."
         )
+        if self.failed:
+            text += f" Failed: {self.failed}."
+        return text
 
 
 @dataclass(frozen=True)
@@ -84,6 +94,7 @@ class _Tally:
     images: int = 0
     estimated_usd: float = 0.0
     skipped: int = 0
+    failed: int = 0
 
 
 def confirm_events(
@@ -96,7 +107,7 @@ def confirm_events(
         raise ValueError("confirm image cap must be at least 1")
     if budget.max_calls < 1:
         raise ValueError("confirm call cap must be at least 1")
-    if budget.max_cost_usd < 0:
+    if not math.isfinite(budget.max_cost_usd) or budget.max_cost_usd < 0:
         raise ValueError("confirm cost cap must be zero or positive")
     tally = _Tally()
     results: list[Confirmation] = []
@@ -106,13 +117,23 @@ def confirm_events(
             tally.skipped += 1
             results.append(_note("Skipped. This event has no snapshots."))
             continue
-        if tally.calls >= budget.max_calls or tally.estimated_usd >= budget.max_cost_usd:
+        if tally.calls >= budget.max_calls:
+            tally.skipped += 1
+            results.append(_note("Skipped. The confirmation call cap was reached."))
+            continue
+        if tally.estimated_usd >= budget.max_cost_usd:
             tally.skipped += 1
             results.append(_note("Skipped. The confirmation cost cap was reached."))
             continue
-        reply = provider.complete([path.read_bytes() for path in chosen])
         tally.calls += 1
         tally.images += len(chosen)
+        try:
+            reply = provider.complete([path.read_bytes() for path in chosen])
+        except ConfirmError as exc:
+            # One failed call should not throw away the scan or the other events.
+            tally.failed += 1
+            results.append(_note(f"Vision check failed. {exc}"))
+            continue
         tally.estimated_usd += max(0.0, reply.estimated_usd)
         results.append(parse_confirmation(reply.text))
     return results, ConfirmSummary(
@@ -120,6 +141,7 @@ def confirm_events(
         images=tally.images,
         estimated_usd=tally.estimated_usd,
         skipped=tally.skipped,
+        failed=tally.failed,
     )
 
 
@@ -137,13 +159,19 @@ def parse_confirmation(text: str) -> Confirmation:
         return _unreadable()
     note = payload.get("note")
     plate = payload.get("plate_text")
+    plate_text = _clean(plate, _MAX_PLATE_CHARS) if isinstance(plate, str) else ""
     return Confirmation(
         vehicle_present=_optional_bool(payload.get("vehicle_present")),
         smoke_present=_optional_bool(payload.get("smoke_present")),
-        plate_text=plate if isinstance(plate, str) and plate else None,
+        plate_text=plate_text or None,
         plate_confidence=_optional_score(payload.get("plate_confidence")),
-        note=note if isinstance(note, str) else "",
+        note=_clean(note, _MAX_NOTE_CHARS) if isinstance(note, str) else "",
     )
+
+
+def _clean(text: str, limit: int) -> str:
+    """Model text reaches a terminal and a CSV. Drop control characters and cap the length."""
+    return _CONTROL_RE.sub(" ", text).strip()[:limit]
 
 
 def format_notice() -> str:
@@ -186,19 +214,22 @@ class AnthropicVision:
         blocks.append({"type": "text", "text": _PROMPT})
         payload: Any = [{"role": "user", "content": blocks}]
         try:
+            # Haiku 5.5 thinks by default. Low effort keeps that short, and the
+            # token cap leaves room for the JSON reply after any thinking.
             message = anthropic.Anthropic(api_key=self._api_key).messages.create(
                 model=self._model,
-                max_tokens=400,
+                max_tokens=2048,
+                output_config={"effort": "low"},
                 messages=payload,
             )
         except Exception as exc:
             raise ConfirmError(f"Anthropic request failed ({type(exc).__name__}).") from None
-        parts = [block.text for block in message.content if block.type == "text"]
         usage = message.usage
-        return ProviderReply(
-            text="\n".join(parts),
-            estimated_usd=estimate_cost_usd(usage.input_tokens, usage.output_tokens),
-        )
+        cost = estimate_cost_usd(usage.input_tokens, usage.output_tokens)
+        if message.stop_reason == "refusal":
+            return ProviderReply(text="", estimated_usd=cost)
+        parts = [block.text for block in message.content if block.type == "text"]
+        return ProviderReply(text="\n".join(parts), estimated_usd=cost)
 
 
 def estimate_cost_usd(input_tokens: float, output_tokens: float) -> float:

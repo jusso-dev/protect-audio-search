@@ -35,7 +35,9 @@ PROTECT_AUDIO_SEARCH_OFFLINE=1 pytest
 
 ## Tests worth knowing
 
-`tests/mock_protect_server.py` stands in for the Protect MCP server. Footage tests use its tiny fake MP4. `tests/test_e2e.py` sets `MOCK_MEDIA_WAV` so the mock muxes a real short file, then runs the real client, ffmpeg, YAMNet, and event detector.
+`tests/mock_protect_server.py` stands in for the Protect MCP server, using the real server's result and error shapes (JSON text, `{"error", "details": {"status"}}`, `savePath`, `startsAt`, `audio`, `recordsAudio`, the download-limit message). Its docstring lists the switches. Footage tests use its tiny fake MP4. `tests/test_e2e.py` sets `MOCK_MEDIA_WAV` so the mock muxes a real short file, then runs the real client, ffmpeg, YAMNet, and event detector. `tests/test_cli_hardening.py` drives `main()` end to end through `PROTECT_AUDIO_SEARCH_MCP_COMMAND`. The CLI passes the child an allowlisted environment, so those tests hand the mock its settings in a JSON file argument instead of `MOCK_*` variables.
+
+When the pinned server version changes, read its `unifi_protect_export_video` and `unifi_protect_list_cameras` definitions and update the mock to match.
 
 `tests/fixtures/engine_cc0.wav` is a CC0 clip. The expected hit is `Motorcycle`. Silence in the end-to-end test is generated digital zero and must produce no events. The squeal fixture is a generated sine sweep, not a recording, and the test does not require it to be `Tire squeal`.
 

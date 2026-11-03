@@ -7,6 +7,7 @@ short, including across footage chunk boundaries. Short blips are dropped.
 from __future__ import annotations
 
 import argparse
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -34,10 +35,11 @@ class EventConfig:
 
 @dataclass(frozen=True)
 class ScoreFrame:
-    """One classifier window. `time` is the window start in UTC."""
+    """Window start in UTC, with an optional end bounding the available audio."""
 
     time: datetime
     scores: Mapping[str, float]
+    end: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -64,10 +66,12 @@ def detect_events(
     if not ordered:
         return []
     class_names = list(ordered[0].scores)
+    runs = _contiguous_runs(ordered, settings.window_seconds)
     smoothed = {
         name: _smooth(
             [float(frame.scores.get(name, 0.0)) for frame in ordered],
             settings.smooth_frames,
+            runs,
         )
         for name in class_names
     }
@@ -147,8 +151,8 @@ def _event_from_group(
     config: EventConfig,
 ) -> DetectionEvent | None:
     start = _as_utc(frames[indexes[0]].time)
-    # The last window still covers `window_seconds` of audio.
-    end = _as_utc(frames[indexes[-1]].time) + timedelta(seconds=config.window_seconds)
+    # A padded tail only covers the real audio, not the zero padding.
+    end = max(_frame_end(frames[index], config.window_seconds) for index in indexes)
     if (end - start).total_seconds() < config.min_duration_seconds:
         return None
     contributing = tuple(
@@ -178,6 +182,11 @@ def _event_from_group(
     )
 
 
+def _frame_end(frame: ScoreFrame, window_seconds: float) -> datetime:
+    end = _as_utc(frame.time) + timedelta(seconds=window_seconds)
+    return min(end, _as_utc(frame.end)) if frame.end is not None else end
+
+
 def _group_indexes(
     indexes: list[int],
     frames: Sequence[ScoreFrame],
@@ -200,18 +209,44 @@ def _group_indexes(
     return groups
 
 
-def _smooth(values: list[float], width: int) -> list[float]:
+def _contiguous_runs(frames: Sequence[ScoreFrame], max_step_seconds: float) -> list[int]:
+    """Index where each frame's run of back-to-back windows starts.
+
+    A gap longer than one window (a chunk with no audio, a failed export) starts
+    a new run, so smoothing never averages across missing audio.
+    """
+    run_starts: list[int] = []
+    for index, frame in enumerate(frames):
+        if index == 0:
+            run_starts.append(0)
+            continue
+        step = (_as_utc(frame.time) - _as_utc(frames[index - 1].time)).total_seconds()
+        run_starts.append(run_starts[-1] if step <= max_step_seconds else index)
+    return run_starts
+
+
+def _smooth(values: list[float], width: int, run_starts: list[int]) -> list[float]:
     if width <= 1:
         return values
     smoothed: list[float] = []
     for index in range(len(values)):
-        start = max(0, index - width + 1)
+        start = max(run_starts[index], index - width + 1)
         window = values[start : index + 1]
         smoothed.append(sum(window) / len(window))
     return smoothed
 
 
 def _validate(config: EventConfig) -> None:
+    for name, value in (("every class", config.threshold), *config.class_thresholds.items()):
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"Threshold for {name} must be between 0 and 1, got {value}")
+    for label, number in (
+        ("gap_seconds", config.gap_seconds),
+        ("min_duration_seconds", config.min_duration_seconds),
+        ("window_seconds", config.window_seconds),
+    ):
+        if not math.isfinite(number):
+            raise ValueError(f"{label} must be a finite number")
     if config.smooth_frames < 1:
         raise ValueError("smooth_frames must be at least 1")
     if config.gap_seconds < 0:

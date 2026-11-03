@@ -87,7 +87,7 @@ def test_raising_threshold_never_increases_event_count() -> None:
     ]
     counts = [
         len(detect_events(frames, camera="Street", config=EventConfig(threshold=threshold)))
-        for threshold in (0.1, 0.3, 0.5, 0.8, 1.1)
+        for threshold in (0.1, 0.3, 0.5, 0.8, 1.0)
     ]
     assert counts == sorted(counts, reverse=True)
 
