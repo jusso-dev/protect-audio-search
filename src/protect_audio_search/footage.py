@@ -416,6 +416,11 @@ async def export_footage(
                         raise
                     # Stop new downloads on a processing error, but retain earlier results.
                     stop_reason = redact(f"Chunk processing failed ({type(exc).__name__}): {exc}")
+                    if chunk.skipped:
+                        stop_reason += (
+                            f" If the cached file is invalid, delete {chunk.path} "
+                            "and rerun to export it again."
+                        )
                     on_failure(FailedChunk(chunk.start, chunk.end, stop_reason))
 
             for index, (chunk_start, chunk_end) in enumerate(ranges, start=1):

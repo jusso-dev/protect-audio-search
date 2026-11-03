@@ -167,13 +167,15 @@ def run_scan(
                 "Protect may have no recording for part of it, so times in it are approximate."
             )
         available_end = min(chunk.end, chunk.origin + timedelta(seconds=heard))
+        chunk_frames: list[ScoreFrame] = []
         for frame in score(waveform):
             when = chunk.origin + timedelta(seconds=frame.time_seconds)
             # The export opens on the keyframe before `start`. That lead-in belongs
             # to the previous chunk and would otherwise be counted twice.
             if when < chunk.start or when >= available_end:
                 continue
-            frames.append(ScoreFrame(time=when, scores=frame.scores, end=available_end))
+            chunk_frames.append(ScoreFrame(time=when, scores=frame.scores, end=available_end))
+        frames.extend(chunk_frames)
         scored += 1
 
     if exporter is None:

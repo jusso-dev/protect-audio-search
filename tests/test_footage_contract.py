@@ -305,6 +305,19 @@ def test_processing_exception_keeps_prior_chunks_and_stops_downloads(tmp_path: P
     assert "Not attempted" in failures[1].error
 
 
+def test_failed_cached_chunk_gives_a_recovery_hint(tmp_path: Path) -> None:
+    first = _export(tmp_path, _env(tmp_path))
+    failures: list[FailedChunk] = []
+
+    def fail(_chunk: FootageChunk) -> None:
+        raise RuntimeError("scorer failed")
+
+    _export(tmp_path, _env(tmp_path), on_failure=failures.append, on_chunk=fail)
+    assert len(_calls(tmp_path)) == 2
+    assert str(first[0].path) in failures[0].error
+    assert "delete" in failures[0].error.lower()
+
+
 def test_local_save_error_keeps_prior_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

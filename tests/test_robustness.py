@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import os
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -224,6 +226,40 @@ def test_event_end_uses_longest_valid_overlapping_window() -> None:
     ]
     events = detect_events(frames, camera="Street", config=EventConfig(min_duration_seconds=0))
     assert events[0].end == T0 + timedelta(seconds=0.975)
+
+
+def test_failed_scoring_does_not_commit_partial_frames(tmp_path: Path) -> None:
+    calls = 0
+
+    def score(_waveform: object) -> list[FrameScore]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [FrameScore(time_seconds=0.0, scores={"Engine": 0.9})]
+        return [
+            FrameScore(time_seconds=0.0, scores={"Engine": 0.9}),
+            FrameScore(time_seconds=float("nan"), scores={"Engine": 0.9}),
+        ]
+
+    env = dict(os.environ)
+    env["MOCK_CALL_LOG"] = str(tmp_path / "calls.jsonl")
+    env["MOCK_EXPORT_DIR"] = str(tmp_path / "cache")
+    scanned = run_scan(
+        camera="Street",
+        start=T0,
+        end=T0 + timedelta(minutes=20),
+        output_dir=tmp_path / "exports",
+        event_config=EventConfig(min_duration_seconds=0),
+        command=sys.executable,
+        args=[str(Path(__file__).with_name("mock_protect_server.py"))],
+        env=env,
+        load_audio=lambda *_args, **_kwargs: np.zeros(32_000, dtype=np.float32),
+        score_audio=score,
+        progress=lambda *_args: None,
+    )
+    assert scanned.scored == 1
+    assert len(scanned.failed) == 1
+    assert [event.start for event in scanned.events] == [T0]
 
 
 def test_one_bad_chunk_is_recorded_and_the_rest_are_scored(tmp_path: Path) -> None:
