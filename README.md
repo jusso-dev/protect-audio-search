@@ -85,7 +85,7 @@ Before a long scan, check the whole chain without exporting anything:
 protect-audio-search check --camera "Street"
 ```
 
-It checks ffmpeg, downloads and hash-checks the model, starts the MCP server, logs in, and asks Protect whether the camera keeps audio in its recordings. A camera with no microphone, the microphone off, or audio recording off fails here, and `scan` refuses it the same way before any export. If the server lists only its auth tool, the message names the variables to set.
+It checks ffmpeg, downloads and hash-checks the model, starts the MCP server, logs in, and asks Protect whether the camera currently keeps audio in its recordings. If audio is off, it prints a note; older recordings may still have sound. If the server lists only its auth tool, the message names the variables to set.
 
 ### 4. Run a scan
 
@@ -104,15 +104,15 @@ Exit status is 0 when the scan finishes, including when nothing matched. Stdout 
 
 Progress is on stderr, in `--tz`. `export 3/30` is printed before each download, `cached 3/30` for a chunk already on disk, and `chunk 3/30` when that chunk is scored. Each chunk is scored as soon as it lands. At the end a line says how many chunks were scored, how many had no audio, and how many failed.
 
-One chunk that cannot be exported (no recording in that window, say) or decoded is reported and skipped, and the scan carries on. Three failures in a row stop the run. The JSON `run` block lists every skipped chunk. Run the same command again to retry them.
+A chunk that cannot be exported (no recording in that window, say) or decoded is reported and skipped, and the scan carries on. Authentication errors, second-factor requests and client timeouts stop further exports; already-scored results are kept and the unattempted range is listed as failed. The JSON `run` block lists every skipped chunk. Run the same command again to retry them.
 
 Footage chunks land in `--output-dir` (default `exports`):
 
 ```text
-exports/<camera-id>/20261020T100000Z_20261020T101000Z.mp4
+exports/<camera-id>/channel-0/20261020T100000Z_20261020T101000Z.mp4
 ```
 
-An existing non-empty chunk file is skipped, so a rerun can resume. The server writes each export straight to `<chunk>.mp4.partial` through its `savePath` argument, and the file is renamed into place when it is complete, so no second copy is left in the server's own cache (`~/.cache/unifi-protect`). A `.json` file next to each chunk keeps the export's real start time for a resumed run.
+An existing non-empty chunk file for the same camera, channel and range is skipped, so a rerun can resume. Each export has a unique partial path through `savePath`, and the file is renamed into place when complete, so no second copy is left in the server's own cache (`~/.cache/unifi-protect`). A `.json` file next to each chunk keeps the export's real start time for a resumed run. A timed-out server may still write a partial file later; check the export folder before removing it.
 
 The Protect export starts on the keyframe before the requested time, up to a second or so early. Event times use the export's reported `startsAt`, and the lead-in is not scored twice.
 
@@ -132,13 +132,13 @@ protect-audio-search scan \
 For a Sydney start of `2026-10-20 21:00`, clips and snapshots go under:
 
 ```text
-exports/20261020T100000Z-Street/clips/0001.mp4
-exports/20261020T100000Z-Street/snapshots/0001-01.jpg
+exports/20261020T100000Z-Street/run-<unique>/clips/0001.mp4
+exports/20261020T100000Z-Street/run-<unique>/snapshots/0001-01.jpg
 ```
 
-The folder stamp is the range start in UTC. File numbers match the `#` column in the table and `number` in the JSON. The folder also gets a `results.json`, and its full path is printed at the end. A rerun of the same range replaces the numbered files from the last run. `--clip-padding` defaults to 5 seconds around the event. Snapshots are spaced across the event itself, not the padding. A clip or snapshot that cannot be written is reported on that event (`media_error`) and the others carry on.
+The folder stamp is the range start in UTC. File numbers match the `#` column in the table and `number` in the JSON. The run folder also gets a `results.json`, and its full path is printed at the end. Each run gets a new folder, preserving earlier review files. `--clip-padding` defaults to 5 seconds around the event. Snapshots are spaced across the event itself, not the padding. A clip or snapshot that cannot be written is reported on that event (`media_error`) and the others carry on.
 
-`--cleanup-chunks` deletes the exported footage files after the results and review files are written, and leaves the review folder. A run that fails or is interrupted keeps its chunks so the next run can resume.
+`--cleanup-chunks` deletes exported footage after results and review files are written when processing is complete. Failed, silent or short chunks and review-media errors cause the footage to be retained for recovery. An interrupted run also keeps its chunks.
 
 Files the scan creates (chunks, clips, snapshots, results) are readable only by your user.
 
@@ -192,8 +192,8 @@ There is no flag to turn a context class into a hit.
 
 1. Validate every flag, check that `ffmpeg` is installed, load and hash-check the model, and, with `--confirm`, check `ANTHROPIC_API_KEY`. Nothing is exported until these pass.
 2. Start `npx -y @mgcrea/mcp-unifi-protect@1.1.0` over stdio (or `PROTECT_AUDIO_SEARCH_MCP_COMMAND`).
-3. Resolve `--camera` and refuse it if Protect says it records no audio.
-4. Export the range in chunks (default 10 minutes, last chunk shorter). Transient errors (429, 5xx, timeouts) retry with backoff. A chunk over the download cap is split. Another error skips that chunk.
+3. Resolve `--camera` and warn if its current settings say it does not record audio; older recordings may still contain sound.
+4. Export the range in chunks (default 10 minutes, last chunk shorter). Transient server errors (429, 5xx) retry with backoff. Client timeouts are not retried immediately because the server may still be writing. A chunk over the download cap is split. Another error skips that chunk.
 5. As each chunk lands, extract 16 kHz mono audio and score each window with the TFLite YAMNet model. A chunk with no audio stream is skipped, with a warning. The last partial window of a chunk is scored too. `WindowScorer` is a small interface so another backend could be added later. No ONNX backend ships.
 6. Merge target-class frames into events. Smoothing does not average across a gap in the audio.
 7. Optionally write clips and snapshots, optionally send snapshots to Anthropic, write the results, then optionally delete the footage chunks.

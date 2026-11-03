@@ -7,6 +7,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
@@ -52,7 +53,6 @@ from protect_audio_search.footage import (
     DEFAULT_CHANNEL,
     DEFAULT_CHUNK_MINUTES,
     ProtectClientError,
-    check_records_audio,
     list_cameras_sync,
     redact,
     resolve_camera,
@@ -287,8 +287,12 @@ def _check(args: argparse.Namespace) -> None:
         print(f"note  {camera.name!r} is offline now. Recorded footage can still export.")
     if camera.recording_mode is not None:
         print(f"note  {camera.name!r} recording mode is {camera.recording_mode}")
-    check_records_audio(camera)
-    if camera.records_audio is None:
+    if camera.records_audio is False:
+        print(
+            f"note  {camera.name!r} does not currently record audio; "
+            "historical footage may still contain sound"
+        )
+    elif camera.records_audio is None:
         print(f"note  the server did not say whether {camera.name!r} records audio")
     else:
         print(f"ok    {camera.name!r} ({camera.id}) records audio")
@@ -345,8 +349,11 @@ def _scan(args: argparse.Namespace) -> None:
         progress=progress,
         export_progress=export_progress,
     )
-    run_dir = review_directory(args.output_dir, args.camera, start).resolve()
     wants_media = bool(args.clips or args.snapshots)
+    run_dir = review_directory(args.output_dir, args.camera, start).resolve()
+    if wants_media:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=run_dir))
     media: list[EventMedia] = []
     if wants_media:
         media = capture_events(
@@ -396,11 +403,23 @@ def _scan(args: argparse.Namespace) -> None:
         write_json(run_dir / "results.json", result, tz)
         print(f"Review files: {run_dir}", file=sys.stderr)
     print(_coverage(scanned), file=sys.stderr)
-    if args.cleanup_chunks:
+    incomplete = bool(
+        not scanned.scored
+        or scanned.failed
+        or scanned.silent
+        or scanned.short
+        or any(item.error for item in media)
+    )
+    if args.cleanup_chunks and not incomplete:
         removed = delete_chunks(scanned.chunks)
         print(f"Deleted {removed} footage chunks.", file=sys.stderr)
+    elif args.cleanup_chunks:
+        print(
+            "Kept footage chunks because the scan or media processing was incomplete.",
+            file=sys.stderr,
+        )
     if scanned.scored == 0:
-        _no_audio()
+        _no_audio(bool(scanned.failed))
 
 
 def _validate_scan_args(args: argparse.Namespace) -> None:
@@ -483,7 +502,13 @@ def _coverage(scanned: ScanOutput) -> str:
     return text
 
 
-def _no_audio() -> NoReturn:
+def _no_audio(failed: bool = False) -> NoReturn:
+    if failed:
+        print(
+            "No audio was scored. Check the reported chunk failures and retry the scan.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     print(
         "No audio was scored, so an empty result does not mean nothing happened. "
         "Check that the camera has a microphone, that it is on, and that Protect keeps "

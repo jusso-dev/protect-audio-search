@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import jsonschema
@@ -13,6 +14,7 @@ import pytest
 from protect_audio_search import __version__
 from protect_audio_search.classifier import ModelCacheError
 from protect_audio_search.cli import main
+from protect_audio_search.footage import FailedChunk, FootageChunk
 from protect_audio_search.scan import ScanOutput
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -130,6 +132,27 @@ def test_no_audio_scored_exits_1_after_writing_json(
     assert payload["run"]["chunks_scored"] == 0
 
 
+def test_failed_scan_keeps_chunks_and_reports_the_cause(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    start = datetime(2026, 10, 20, 10, tzinfo=UTC)
+    path = tmp_path / "chunk.mp4"
+    path.write_bytes(b"original")
+    chunk = FootageChunk(path, start, start + timedelta(minutes=10), False)
+    failure = FailedChunk(start, start + timedelta(minutes=10), "export failed")
+    monkeypatch.setattr("protect_audio_search.cli.prepare_scan", lambda: None)
+    monkeypatch.setattr(
+        "protect_audio_search.cli.run_scan",
+        lambda **_kwargs: ScanOutput(events=[], chunks=[chunk], failed=[failure], planned=1),
+    )
+    with pytest.raises(SystemExit) as caught:
+        main([*BASE, "--cleanup-chunks", "--json", str(tmp_path / "result.json")])
+    assert caught.value.code == 1
+    assert path.read_bytes() == b"original"
+    assert "reported chunk failures" in capsys.readouterr().err
+    assert json.loads((tmp_path / "result.json").read_text())["run"]["chunks_failed"]
+
+
 def _mock_command(tmp_path: Path, **settings: str) -> str:
     config = tmp_path / "mock.json"
     config.write_text(
@@ -183,10 +206,10 @@ def test_full_cli_scan_through_the_mock_server(
     assert first["number"] == 1
     assert Path(first["clip"]).is_file()
     assert Path(payload["run"]["review_dir"], "results.json").is_file()
-    # The server wrote straight into our chunk path, and cleanup removed it.
+    # Short audio is incomplete coverage, so cleanup keeps the source chunks.
     assert not (tmp_path / "server-cache").exists()
-    assert not list(Path("exports").rglob("*.mp4.partial"))
-    assert not list(Path("exports", "cam-1").glob("*"))
+    assert not list(Path("exports").rglob("*.partial"))
+    assert len(list(Path("exports", "cam-1").rglob("*.mp4"))) == 2
     calls = [json.loads(line) for line in Path("calls.jsonl").read_text().splitlines()]
     assert {call["channel"] for call in calls} == {0}
 
@@ -198,12 +221,10 @@ def test_check_reports_a_camera_that_records_no_audio(
     monkeypatch.setenv(
         "PROTECT_AUDIO_SEARCH_MCP_COMMAND", _mock_command(tmp_path, MOCK_CAMERAS=cameras)
     )
-    with pytest.raises(SystemExit) as caught:
-        main(["check", "--camera", "Street"])
-    assert caught.value.code == 1
+    main(["check", "--camera", "Street"])
     captured = capsys.readouterr()
     assert "ok    MCP server started and listed 1 cameras" in captured.out
-    assert "does not record audio" in captured.err
+    assert "does not currently record audio" in captured.out
 
 
 def test_check_passes_for_a_camera_with_audio(

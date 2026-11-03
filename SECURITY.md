@@ -18,9 +18,9 @@ There is no separate security email. Do not file a public issue for a leaked sec
 
 ## What a scan is allowed to do
 
-The default child is `npx -y @mgcrea/mcp-unifi-protect@1.1.0`. `npx -y` downloads and runs that package. The version is pinned so a cold npx cache does not pull an unreviewed release, but its own dependencies use version ranges. Treat it as third-party code. To run a copy you installed and locked yourself, set `PROTECT_AUDIO_SEARCH_MCP_COMMAND`. The tool calls only `unifi_protect_list_cameras` and `unifi_protect_export_video`, and lists the server's tools first.
+The default child is `npx -y @mgcrea/mcp-unifi-protect@1.1.0`. `npx -y` downloads and runs that package. The top-level version is pinned, but its dependencies use version ranges and can change on a cold cache. Treat it as third-party code. To run a copy you installed and locked yourself, set `PROTECT_AUDIO_SEARCH_MCP_COMMAND`. The tool calls only `unifi_protect_list_cameras` and `unifi_protect_export_video`, and lists the server's tools first.
 
-Each export names its own destination (`savePath`) inside `--output-dir`. A server that writes anywhere else is refused, and that file is not copied. Partial downloads are removed when an export fails.
+Each export names its own destination (`savePath`) inside `--output-dir`. A server that writes anywhere else is refused, and that file is not copied. Partial downloads are removed when an export fails, but a timed-out server may still finish writing its unique partial path afterward.
 
 Leave `UNIFI_PROTECT_ALLOW_WRITES` unset so that server does not register tools that change the console. Use a local view-only account. Leave TLS verification on. Do not set `UNIFI_PROTECT_VERIFY_TLS=false`. Certificate pinning is the MCP server's job and is described in its README.
 

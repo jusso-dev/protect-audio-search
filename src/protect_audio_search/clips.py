@@ -27,8 +27,6 @@ from protect_audio_search.times import format_utc
 DEFAULT_PADDING_SECONDS = 5.0
 # One frame at 10 fps. Seeking closer to the end than this can return no frame.
 _END_GUARD_SECONDS = 0.1
-_STALE_CLIP = re.compile(r"^\d{4}\.mp4$")
-_STALE_SNAPSHOT = re.compile(r"^\d{4}-\d{2}\.jpg$")
 
 
 @dataclass(frozen=True)
@@ -60,7 +58,6 @@ def capture_events(
     if snapshot_count < 0:
         raise ValueError("snapshot count must be zero or positive")
     run_dir = run_dir.resolve()
-    _clear_stale(run_dir)
     durations: dict[Path, float] = {}
     media: list[EventMedia] = []
     for index, event in enumerate(events, start=1):
@@ -90,19 +87,6 @@ def delete_chunks(chunks: Sequence[FootageChunk]) -> int:
     return removed
 
 
-def _clear_stale(run_dir: Path) -> None:
-    """Remove numbered files from an earlier run of the same range."""
-    for folder, pattern in (
-        (run_dir / "clips", _STALE_CLIP),
-        (run_dir / "snapshots", _STALE_SNAPSHOT),
-    ):
-        if not folder.is_dir():
-            continue
-        for path in folder.iterdir():
-            if path.is_file() and pattern.match(path.name):
-                path.unlink()
-
-
 def _capture_one(
     event: DetectionEvent,
     chunks: Sequence[FootageChunk],
@@ -124,6 +108,8 @@ def _capture_one(
                 raise AudioError(f"No footage covers event {index}")
             dest = run_dir / "clips" / f"{index:04d}.mp4"
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                raise AudioError(f"Review file already exists: {dest}")
             _write_clip(segments, dest)
             clip = dest
         except FfmpegMissingError:
@@ -132,7 +118,7 @@ def _capture_one(
             errors.append(f"clip: {exc}")
     snapshots: tuple[Path, ...] = ()
     try:
-        snapshots = _write_snapshots(
+        snapshots, snapshot_errors = _write_snapshots(
             event,
             chunks,
             run_dir=run_dir,
@@ -140,6 +126,7 @@ def _capture_one(
             count=snapshot_count,
             durations=durations,
         )
+        errors.extend(snapshot_errors)
     except FfmpegMissingError:
         raise
     except AudioError as exc:
@@ -222,41 +209,53 @@ def _write_snapshots(
     index: int,
     count: int,
     durations: dict[Path, float],
-) -> tuple[Path, ...]:
+) -> tuple[tuple[Path, ...], list[str]]:
     if count == 0:
-        return ()
+        return (), []
     duration = (event.end - event.start).total_seconds()
     if duration <= 0:
         raise AudioError(f"Event {index} has no duration to snapshot")
     folder = run_dir / "snapshots"
     folder.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
+    errors: list[str] = []
     for snap in range(count):
-        when = event.start + timedelta(seconds=duration * (snap + 0.5) / count)
-        source, offset = _locate(chunks, when, durations)
         dest = folder / f"{index:04d}-{snap + 1:02d}.jpg"
-        _ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-nostdin",
-                "-v",
-                "error",
-                "-ss",
-                f"{offset:.3f}",
-                "-i",
-                str(source),
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                str(dest),
-            ]
-        )
-        if not dest.is_file():
-            raise AudioError(f"ffmpeg wrote no frame at {offset:.3f} s of {source.name}")
-        paths.append(dest)
-    return tuple(paths)
+        writing = False
+        try:
+            if dest.exists():
+                raise AudioError(f"Review file already exists: {dest}")
+            when = event.start + timedelta(seconds=duration * (snap + 0.5) / count)
+            source, offset = _locate(chunks, when, durations)
+            writing = True
+            _ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-ss",
+                    f"{offset:.3f}",
+                    "-i",
+                    str(source),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    str(dest),
+                ]
+            )
+            if not dest.is_file():
+                raise AudioError(f"ffmpeg wrote no frame at {offset:.3f} s of {source.name}")
+            paths.append(dest)
+        except FfmpegMissingError:
+            raise
+        except AudioError as exc:
+            if writing:
+                dest.unlink(missing_ok=True)
+            errors.append(f"snapshot {snap + 1}: {exc}")
+    return tuple(paths), errors
 
 
 def _locate(

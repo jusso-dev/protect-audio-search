@@ -67,7 +67,7 @@ def test_export_writes_straight_to_the_chunk_and_leaves_no_server_copy(tmp_path:
     chunks = _export(tmp_path, _env(tmp_path, MOCK_PREROLL_MS="700"), channel=2)
     calls = _calls(tmp_path)
     assert {call["channel"] for call in calls} == {2}
-    assert all(str(call["savePath"]).endswith(".mp4.partial") for call in calls)
+    assert all(str(call["savePath"]).endswith(".partial") for call in calls)
     assert all(Path(str(call["savePath"])).is_absolute() for call in calls)
     assert not (tmp_path / "server-cache").exists()
     for chunk in chunks:
@@ -104,6 +104,10 @@ def test_chunk_over_the_download_limit_is_split(tmp_path: Path) -> None:
     assert chunks[0].start == START
     assert chunks[-1].end == END
     assert {count for _index, count in progress} == {2}
+    before = len(_calls(tmp_path))
+    cached = _export(tmp_path, _env(tmp_path, MOCK_MAX_SECONDS="300"))
+    assert all(chunk.skipped for chunk in cached)
+    assert len(_calls(tmp_path)) == before
 
 
 def test_failed_chunk_is_reported_and_the_run_continues(tmp_path: Path) -> None:
@@ -121,23 +125,84 @@ def test_failed_chunk_is_reported_and_the_run_continues(tmp_path: Path) -> None:
     assert "no recording" in failures[0].error
 
 
-def test_every_chunk_failing_stops_the_run(tmp_path: Path) -> None:
+def test_every_chunk_failing_reports_the_whole_range(tmp_path: Path) -> None:
     failures: list[FailedChunk] = []
-    with pytest.raises(ProtectClientError, match="in a row"):
-        asyncio.run(
-            export_footage(
-                camera="Street",
-                start=START,
-                end=START + timedelta(hours=1),
-                output_dir=tmp_path / "chunks",
-                command=sys.executable,
-                args=[str(SERVER)],
-                env=_env(tmp_path, MOCK_PERMANENT_ERROR="Not found"),
-                retry_backoff_seconds=0,
-                on_failure=failures.append,
-            )
+    chunks = asyncio.run(
+        export_footage(
+            camera="Street",
+            start=START,
+            end=START + timedelta(hours=1),
+            output_dir=tmp_path / "chunks",
+            command=sys.executable,
+            args=[str(SERVER)],
+            env=_env(tmp_path, MOCK_PERMANENT_ERROR="Not found"),
+            retry_backoff_seconds=0,
+            on_failure=failures.append,
         )
+    )
+    assert chunks == []
+    assert len(failures) == 6
+
+
+def test_three_gaps_do_not_discard_or_prevent_other_chunks(tmp_path: Path) -> None:
+    failures: list[FailedChunk] = []
+    ready: list[FootageChunk] = []
+    chunks = asyncio.run(
+        export_footage(
+            camera="Street",
+            start=START,
+            end=START + timedelta(minutes=50),
+            output_dir=tmp_path / "chunks",
+            command=sys.executable,
+            args=[str(SERVER)],
+            env=_env(
+                tmp_path,
+                MOCK_FAIL_STARTS=",".join(
+                    (START + timedelta(minutes=minute)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    for minute in (10, 20, 30)
+                ),
+            ),
+            retry_backoff_seconds=0,
+            on_failure=failures.append,
+            on_chunk=ready.append,
+        )
+    )
+    assert [chunk.start for chunk in chunks] == [START, START + timedelta(minutes=40)]
+    assert ready == chunks
     assert len(failures) == 3
+
+
+def test_auth_error_stops_future_exports_but_keeps_partial_results(tmp_path: Path) -> None:
+    failures: list[FailedChunk] = []
+    chunks = asyncio.run(
+        export_footage(
+            camera="Street",
+            start=START,
+            end=START + timedelta(minutes=40),
+            output_dir=tmp_path / "chunks",
+            command=sys.executable,
+            args=[str(SERVER)],
+            env=_env(
+                tmp_path,
+                MOCK_FAIL_STARTS=(START + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                MOCK_FAIL_STATUS="401",
+            ),
+            retry_backoff_seconds=0,
+            on_failure=failures.append,
+        )
+    )
+    assert [chunk.start for chunk in chunks] == [START]
+    assert len(_calls(tmp_path)) == 2
+    assert len(failures) == 3
+    assert "Not attempted" in failures[-1].error
+
+
+def test_channel_changes_do_not_reuse_other_channel(tmp_path: Path) -> None:
+    first = _export(tmp_path, _env(tmp_path), channel=2)
+    second = _export(tmp_path, _env(tmp_path), channel=0)
+    assert all(not chunk.skipped for chunk in second)
+    assert {chunk.path for chunk in first}.isdisjoint(chunk.path for chunk in second)
+    assert [call["channel"] for call in _calls(tmp_path)] == [2, 2, 0, 0]
 
 
 def test_camera_without_audio_is_refused_before_export(tmp_path: Path) -> None:
@@ -145,6 +210,15 @@ def test_camera_without_audio_is_refused_before_export(tmp_path: Path) -> None:
     with pytest.raises(ProtectClientError, match="does not record audio"):
         _export(tmp_path, _env(tmp_path, MOCK_CAMERAS=cameras), require_audio=True)
     assert _calls(tmp_path) == []
+
+
+def test_historical_scan_warns_but_exports_when_current_audio_is_off(tmp_path: Path) -> None:
+    cameras = json.dumps([{"id": "cam-1", "name": "Street", "recordsAudio": False}])
+    warnings: list[str] = []
+    chunks = _export(tmp_path, _env(tmp_path, MOCK_CAMERAS=cameras), warn=warnings.append)
+    assert len(chunks) == 2
+    assert len(_calls(tmp_path)) == 2
+    assert any("historical footage" in warning for warning in warnings)
 
 
 def test_unconfigured_server_names_the_variables(tmp_path: Path) -> None:
@@ -166,14 +240,14 @@ def test_camera_list_reads_audio_and_recording_fields(tmp_path: Path) -> None:
     assert cameras[0].recording_mode == "always"
 
 
-def test_request_timeout_is_retryable() -> None:
+def test_request_timeout_is_not_retried() -> None:
     class TimingOut:
         async def call_tool(self, _name: str, _arguments: dict[str, object]) -> object:
             raise MCPError(code=-32001, message="Request 'tools/call' timed out")
 
     with pytest.raises(ToolFailed) as caught:
         asyncio.run(_call_tool(TimingOut(), "unifi_protect_export_video", {}))  # type: ignore[arg-type]
-    assert caught.value.transient
+    assert not caught.value.transient
 
 
 def test_transient_status_comes_from_the_error_details() -> None:

@@ -276,7 +276,7 @@ def test_one_event_failing_does_not_stop_the_others(tmp_path: Path) -> None:
     assert media[2].clip is not None
 
 
-def test_rerun_clears_stale_review_files(tmp_path: Path) -> None:
+def test_capture_preserves_existing_review_files(tmp_path: Path) -> None:
     _video(tmp_path / "a.mp4", 10)
     chunk = FootageChunk(tmp_path / "a.mp4", T0, T0 + timedelta(seconds=10), False)
     run_dir = tmp_path / "run"
@@ -284,9 +284,45 @@ def test_rerun_clears_stale_review_files(tmp_path: Path) -> None:
     (run_dir / "clips" / "0009.mp4").write_bytes(b"old")
     (run_dir / "clips" / "keep.txt").write_text("mine", encoding="utf-8")
     capture_events([_event(1, 3)], [chunk], run_dir=run_dir, write_clips=True)
-    assert not (run_dir / "clips" / "0009.mp4").exists()
+    assert (run_dir / "clips" / "0009.mp4").read_bytes() == b"old"
     assert (run_dir / "clips" / "keep.txt").exists()
     assert (run_dir / "clips" / "0001.mp4").exists()
+
+
+def test_capture_does_not_overwrite_existing_clip(tmp_path: Path) -> None:
+    _video(tmp_path / "a.mp4", 10)
+    chunk = FootageChunk(tmp_path / "a.mp4", T0, T0 + timedelta(seconds=10), False)
+    run_dir = tmp_path / "run"
+    (run_dir / "clips").mkdir(parents=True)
+    old = run_dir / "clips" / "0001.mp4"
+    old.write_bytes(b"retained")
+    media = capture_events([_event(1, 3)], [chunk], run_dir=run_dir, write_clips=True)
+    assert old.read_bytes() == b"retained"
+    assert media[0].error and "already exists" in media[0].error
+
+
+def test_partial_snapshot_failure_keeps_successes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _video(tmp_path / "a.mp4", 10)
+    chunk = FootageChunk(tmp_path / "a.mp4", T0, T0 + timedelta(seconds=10), False)
+    from protect_audio_search import clips
+    from protect_audio_search.audio import AudioError
+
+    original = clips._ffmpeg
+    calls = 0
+
+    def fail_second(command: list[str], *args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise AudioError("snapshot failed")
+        original(command, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(clips, "_ffmpeg", fail_second)
+    media = capture_events([_event(1, 3)], [chunk], run_dir=tmp_path / "run", snapshot_count=3)
+    assert len(media[0].snapshots) == 2
+    assert media[0].error and "snapshot 2" in media[0].error
 
 
 # Confirmation and output

@@ -107,7 +107,10 @@ def export_video(
         return _fail(permanent, 404)
     if start in os.environ.get("MOCK_FAIL_STARTS", "").split(","):
         _log({**record, "error": "no recording"})
-        return _fail("Protect has no recording for that window", 404)
+        return _fail(
+            "Protect has no recording for that window",
+            int(os.environ.get("MOCK_FAIL_STATUS", "404")),
+        )
     max_seconds = os.environ.get("MOCK_MAX_SECONDS")
     span = (_parse(end) - _parse(start)).total_seconds()
     if max_seconds and span > float(max_seconds):

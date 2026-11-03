@@ -103,7 +103,7 @@ def run_scan(
     command: str | None = None,
     args: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
-    require_audio: bool = True,
+    require_audio: bool = False,
     exporter: Exporter | None = None,
     load_audio: AudioLoader | None = None,
     score_audio: Scorer | None = None,
@@ -136,6 +136,10 @@ def run_scan(
     def process(chunk: FootageChunk) -> None:
         nonlocal scored
         chunks.append(chunk)
+        if chunk.media_start is None:
+            warn(
+                f"Chunk {chunk.path.name} has no export start time; event times may be approximate."
+            )
         planned_chunk = index_of(chunk)
         progress(planned_chunk.index, planned_chunk.count, chunk.start, chunk.end)
         if chunk.has_audio is False:
@@ -184,6 +188,7 @@ def run_scan(
                 chunk_minutes=chunk_minutes,
                 channel=channel,
                 require_audio=require_audio,
+                warn=warn,
                 progress=export_progress,
                 on_chunk=process,
                 on_failure=fail,

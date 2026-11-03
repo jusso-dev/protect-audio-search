@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,7 +25,7 @@ from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 
-# Pinned so a cold npx cache cannot pull an unreviewed release.
+# Pin the top-level package; npx may still resolve newer transitive dependencies.
 SERVER_PACKAGE = "@mgcrea/mcp-unifi-protect@1.1.0"
 DEFAULT_COMMAND = "npx"
 DEFAULT_ARGS: tuple[str, ...] = ("-y", SERVER_PACKAGE)
@@ -35,8 +36,6 @@ DEFAULT_TOOL_TIMEOUT_SECONDS = 15 * 60
 DEFAULT_RETRY_BACKOFF_SECONDS = 5.0
 # A chunk over the server's download cap is split in half, down to this length.
 MIN_SPLIT_SECONDS = 60
-# Give up on a run when this many chunks in a row fail to export.
-MAX_CONSECUTIVE_FAILURES = 3
 
 _SECRET_KEYS = r"password|passwd|passcode|token|secret|api[_-]?key|totp|authorization|cookie"
 _SECRET_RE = re.compile(
@@ -109,6 +108,10 @@ class ProtectClientError(Exception):
     """Failure talking to the MCP server, or a bad camera or time range."""
 
 
+class ExportStopped(ProtectClientError):
+    """A systemic error makes further exports unsafe or unlikely to succeed."""
+
+
 class UnknownCameraError(ProtectClientError):
     """The requested camera is not in the server's camera list."""
 
@@ -129,10 +132,12 @@ class ToolFailed(ProtectClientError):
         status: int | None = None,
         transient: bool | None = None,
         needs_two_factor: bool = False,
+        timed_out: bool = False,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.needs_two_factor = needs_two_factor
+        self.timed_out = timed_out
         if transient is None:
             transient = (status in _TRANSIENT_STATUS) if status is not None else None
         self.transient = is_transient(message) if transient is None else transient
@@ -273,9 +278,11 @@ def check_records_audio(camera: Camera) -> None:
         )
 
 
-def chunk_destination(output_dir: Path, camera_id: str, start: datetime, end: datetime) -> Path:
+def chunk_destination(
+    output_dir: Path, camera_id: str, start: datetime, end: datetime, channel: int = DEFAULT_CHANNEL
+) -> Path:
     safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", camera_id).strip("._") or "camera"
-    return output_dir / safe_id / f"{_stamp(start)}_{_stamp(end)}.mp4"
+    return output_dir / safe_id / f"channel-{channel}" / f"{_stamp(start)}_{_stamp(end)}.mp4"
 
 
 def sidecar_path(chunk_path: Path) -> Path:
@@ -357,6 +364,7 @@ async def export_footage(
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     require_audio: bool = False,
+    warn: Callable[[str], None] | None = None,
     progress: ExportProgress | None = None,
     on_chunk: ChunkReady | None = None,
     on_failure: ChunkFailed | None = None,
@@ -369,8 +377,7 @@ async def export_footage(
     chunk lands, so a caller can score it before the next export.
 
     With `on_failure`, a chunk that still fails is reported and the run carries
-    on, until `MAX_CONSECUTIVE_FAILURES` chunks in a row fail. Without it, the
-    first failure raises.
+    on. Without it, the first failure raises.
     """
     names = tool_names or ToolNames()
     ranges = split_range(start, end, chunk_minutes)
@@ -388,19 +395,36 @@ async def export_footage(
             chosen = resolve_camera(await _list(session, names), camera)
             if require_audio:
                 check_records_audio(chosen)
+            elif chosen.records_audio is False and warn is not None:
+                warn(
+                    f"Camera {chosen.name!r} does not currently record audio; "
+                    "historical footage may still contain sound."
+                )
             exported: list[FootageChunk] = []
-            consecutive = 0
             for index, (chunk_start, chunk_end) in enumerate(ranges, start=1):
                 pending = [(chunk_start, chunk_end)]
                 while pending:
                     part_start, part_end = pending.pop(0)
-                    dest = chunk_destination(destination_root, chosen.id, part_start, part_end)
+                    dest = chunk_destination(
+                        destination_root, chosen.id, part_start, part_end, channel
+                    )
                     cached = _cached_chunk(dest, part_start, part_end)
+                    if cached is None:
+                        parts = _cached_parts(
+                            destination_root, chosen.id, part_start, part_end, channel
+                        )
+                        if parts:
+                            for part in parts:
+                                if progress is not None:
+                                    progress(index, len(ranges), part.start, part.end, True)
+                                exported.append(part)
+                                if on_chunk is not None:
+                                    on_chunk(part)
+                            continue
                     if progress is not None:
                         progress(index, len(ranges), part_start, part_end, cached is not None)
                     if cached is not None:
                         exported.append(cached)
-                        consecutive = 0
                         if on_chunk is not None:
                             on_chunk(cached)
                         continue
@@ -417,23 +441,29 @@ async def export_footage(
                             retry_backoff_seconds=retry_backoff_seconds,
                         )
                     except ProtectClientError as exc:
+                        if isinstance(exc, ExportStopped) and on_failure is not None:
+                            on_failure(FailedChunk(part_start, part_end, redact(str(exc))))
+                            unattempted = pending + ranges[index:]
+                            for missing_start, missing_end in unattempted:
+                                on_failure(
+                                    FailedChunk(
+                                        missing_start,
+                                        missing_end,
+                                        "Not attempted after an export stopped: "
+                                        + redact(str(exc)),
+                                    )
+                                )
+                            return exported
                         halves = _split_for_limit(str(exc), part_start, part_end)
                         if halves:
                             pending[:0] = halves
                             continue
                         if on_failure is None:
                             raise
-                        consecutive += 1
                         on_failure(FailedChunk(part_start, part_end, redact(str(exc))))
-                        if consecutive >= MAX_CONSECUTIVE_FAILURES:
-                            raise ProtectClientError(
-                                f"{consecutive} chunks in a row failed to export. "
-                                f"Last error: {redact(str(exc))}"
-                            ) from exc
                         continue
                     chunk = _place_chunk(info, dest, part_start, part_end)
                     exported.append(chunk)
-                    consecutive = 0
                     if on_chunk is not None:
                         on_chunk(chunk)
             return exported
@@ -563,6 +593,27 @@ def _cached_chunk(dest: Path, start: datetime, end: datetime) -> FootageChunk | 
     )
 
 
+def _cached_parts(
+    root: Path, camera_id: str, start: datetime, end: datetime, channel: int
+) -> list[FootageChunk] | None:
+    """Reuse a complete set of previously split chunks without another oversized export."""
+    halves = _split_for_limit("-byte limit", start, end)
+    if not halves:
+        return None
+    parts: list[FootageChunk] = []
+    for begin, finish in halves:
+        path = chunk_destination(root, camera_id, begin, finish, channel)
+        cached = _cached_chunk(path, begin, finish)
+        if cached is not None:
+            parts.append(cached)
+        else:
+            children = _cached_parts(root, camera_id, begin, finish, channel)
+            if children is None:
+                return None
+            parts.extend(children)
+    return parts
+
+
 def _split_for_limit(
     message: str, start: datetime, end: datetime
 ) -> list[tuple[datetime, datetime]]:
@@ -588,7 +639,7 @@ async def _export_with_retry(
     retries: int,
     retry_backoff_seconds: float,
 ) -> ExportInfo:
-    partial = _partial_path(dest)
+    partial = dest.with_name(f"{dest.name}.{uuid.uuid4().hex}.partial")
     dest.parent.mkdir(parents=True, exist_ok=True)
     attempts = retries + 1
     last_error: ToolFailed | None = None
@@ -619,6 +670,8 @@ async def _export_with_retry(
                 return info
             except ToolFailed as exc:
                 last_error = exc
+                if exc.timed_out or exc.needs_two_factor or exc.status in {401, 403}:
+                    raise ExportStopped(redact(f"Export stopped: {_explain(exc)}")) from exc
                 if not exc.transient or attempt >= retries:
                     raise ProtectClientError(redact(f"Export failed: {_explain(exc)}")) from exc
                 await asyncio.sleep(retry_backoff_seconds * (2**attempt))
@@ -633,7 +686,9 @@ async def _call_tool(session: ClientSession, name: str, arguments: dict[str, Any
         result = await session.call_tool(name, arguments)
     except MCPError as exc:
         if exc.code == _REQUEST_TIMEOUT or "timed out" in exc.message:
-            raise ToolFailed(f"Tool {name} timed out", transient=True) from exc
+            # The server may ignore cancellation and continue writing the requested path.
+            # Retrying immediately could make two exports write the same file.
+            raise ToolFailed(f"Tool {name} timed out", transient=False, timed_out=True) from exc
         raise ProtectClientError(redact(f"Tool {name} failed: {exc.message}")) from exc
     except Exception as exc:
         raise ProtectClientError(redact(f"Tool {name} failed: {exc}")) from exc
@@ -690,7 +745,7 @@ def _explain(exc: ToolFailed) -> str:
 
 def _place_chunk(info: ExportInfo, dest: Path, start: datetime, end: datetime) -> FootageChunk:
     """Move the server's file into place and record its timing next to it."""
-    partial = _partial_path(dest)
+    partial = info.path
     meta: dict[str, object] = {
         "start": _iso(start),
         "end": _iso(end),
@@ -710,10 +765,6 @@ def _place_chunk(info: ExportInfo, dest: Path, start: datetime, end: datetime) -
         media_start=info.media_start,
         has_audio=info.has_audio,
     )
-
-
-def _partial_path(dest: Path) -> Path:
-    return dest.with_name(dest.name + ".partial")
 
 
 def _same_file(reported: Path, expected: Path) -> bool:
