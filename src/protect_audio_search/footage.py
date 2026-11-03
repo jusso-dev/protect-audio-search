@@ -411,10 +411,11 @@ async def export_footage(
                     return
                 try:
                     on_chunk(chunk)
-                except OSError as exc:
+                except Exception as exc:
                     if on_failure is None:
                         raise
-                    stop_reason = redact(f"Local chunk processing failed: {exc}")
+                    # Stop new downloads on a processing error, but retain earlier results.
+                    stop_reason = redact(f"Chunk processing failed ({type(exc).__name__}): {exc}")
                     on_failure(FailedChunk(chunk.start, chunk.end, stop_reason))
 
             for index, (chunk_start, chunk_end) in enumerate(ranges, start=1):
@@ -437,9 +438,15 @@ async def export_footage(
                             continue
                     if cached is None and stop_reason is not None:
                         assert on_failure is not None
-                        on_failure(
-                            FailedChunk(part_start, part_end, "Not attempted: " + stop_reason)
-                        )
+                        for entry in _cached_partial_parts(
+                            destination_root, chosen.id, part_start, part_end, channel
+                        ):
+                            if isinstance(entry, FootageChunk):
+                                if progress is not None:
+                                    progress(index, len(ranges), entry.start, entry.end, True)
+                                accept(entry)
+                            else:
+                                on_failure(FailedChunk(*entry, "Not attempted: " + stop_reason))
                         continue
                     if progress is not None:
                         progress(index, len(ranges), part_start, part_end, cached is not None)
@@ -478,6 +485,11 @@ async def export_footage(
                             raise
                         with contextlib.suppress(OSError):
                             info.path.unlink(missing_ok=True)
+                        side_partial = sidecar_path(dest).with_name(
+                            sidecar_path(dest).name + ".partial"
+                        )
+                        with contextlib.suppress(OSError):
+                            side_partial.unlink(missing_ok=True)
                         stop_reason = redact(f"Could not save footage: {exc}")
                         on_failure(FailedChunk(part_start, part_end, stop_reason))
                         continue
@@ -494,7 +506,7 @@ async def export_footage(
         found = _find_client_error(exc)
         if found is not None:
             raise found from None
-        raise ProtectClientError(redact(f"MCP server failed to start: {exc}")) from exc
+        raise ProtectClientError(redact(f"MCP export session failed: {exc}")) from exc
 
 
 async def list_cameras(
@@ -628,6 +640,24 @@ def _cached_parts(
                 return None
             parts.extend(children)
     return parts
+
+
+def _cached_partial_parts(
+    root: Path, camera_id: str, start: datetime, end: datetime, channel: int
+) -> list[FootageChunk | tuple[datetime, datetime]]:
+    """Return cached pieces and the missing intervals after downloads have stopped."""
+    cached = _cached_chunk(chunk_destination(root, camera_id, start, end, channel), start, end)
+    if cached is not None:
+        return [cached]
+    halves = _split_for_limit("-byte limit", start, end)
+    if not halves:
+        return [(start, end)]
+    parts = [
+        part
+        for begin, finish in halves
+        for part in _cached_partial_parts(root, camera_id, begin, finish, channel)
+    ]
+    return parts if any(isinstance(part, FootageChunk) for part in parts) else [(start, end)]
 
 
 def _split_for_limit(

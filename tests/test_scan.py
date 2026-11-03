@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
+
 from protect_audio_search.classifier import DEFAULT_TARGET_CLASSES, FrameScore
 from protect_audio_search.events import EventConfig
 from protect_audio_search.footage import FootageChunk
@@ -33,10 +35,10 @@ def test_run_scan_times_frames_from_each_chunk(tmp_path: Path) -> None:
     def exporter(**_kwargs: object) -> list[FootageChunk]:
         return chunks
 
-    def load_audio(path: Path, *, camera: str, chunk_label: str) -> str:
+    def load_audio(path: Path, *, camera: str, chunk_label: str) -> np.ndarray:
         assert camera == "Street"
         assert chunk_label == path.name
-        return path.name
+        return np.zeros(32_000, dtype=np.float32)
 
     scanned = run_scan(
         camera="Street",

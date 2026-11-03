@@ -238,6 +238,73 @@ def test_cached_later_chunks_are_scored_after_auth_failure(tmp_path: Path) -> No
     assert len(_calls(tmp_path)) == 4
 
 
+def test_partly_cached_split_range_is_scored_after_stop(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    common = dict(
+        camera="Street",
+        output_dir=tmp_path / "chunks",
+        command=sys.executable,
+        args=[str(SERVER)],
+        retry_backoff_seconds=0,
+    )
+    asyncio.run(
+        export_footage(
+            start=START + timedelta(minutes=20),
+            end=START + timedelta(minutes=25),
+            env=env,
+            **common,
+        )
+    )
+    env["MOCK_FAIL_STARTS"] = (START + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    env["MOCK_FAIL_STATUS"] = "401"
+    failures: list[FailedChunk] = []
+    chunks = asyncio.run(
+        export_footage(
+            start=START,
+            end=START + timedelta(minutes=30),
+            env=env,
+            on_failure=failures.append,
+            **common,
+        )
+    )
+    assert [chunk.start for chunk in chunks] == [START, START + timedelta(minutes=20)]
+    assert [(failure.start, failure.end) for failure in failures] == [
+        (START + timedelta(minutes=10), START + timedelta(minutes=20)),
+        (START + timedelta(minutes=25), START + timedelta(minutes=30)),
+    ]
+    assert len(_calls(tmp_path)) == 3
+
+
+def test_processing_exception_keeps_prior_chunks_and_stops_downloads(tmp_path: Path) -> None:
+    failures: list[FailedChunk] = []
+    ready: list[FootageChunk] = []
+
+    def process(chunk: FootageChunk) -> None:
+        if ready:
+            raise RuntimeError("scorer failed")
+        ready.append(chunk)
+
+    chunks = asyncio.run(
+        export_footage(
+            camera="Street",
+            start=START,
+            end=START + timedelta(minutes=30),
+            output_dir=tmp_path / "chunks",
+            command=sys.executable,
+            args=[str(SERVER)],
+            env=_env(tmp_path),
+            retry_backoff_seconds=0,
+            on_failure=failures.append,
+            on_chunk=process,
+        )
+    )
+    assert len(ready) == 1
+    assert len(chunks) == 2
+    assert len(_calls(tmp_path)) == 2
+    assert "RuntimeError" in failures[0].error
+    assert "Not attempted" in failures[1].error
+
+
 def test_local_save_error_keeps_prior_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

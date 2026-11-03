@@ -185,6 +185,47 @@ def test_frames_use_starts_at_and_drop_the_lead_in(tmp_path: Path) -> None:
     assert scanned.events[0].start == T0 + timedelta(seconds=0.44)
 
 
+def test_padded_tail_is_bounded_before_duration_and_snapshot_selection(tmp_path: Path) -> None:
+    path = tmp_path / "tail.mp4"
+    _video(path, 11)
+    chunk = FootageChunk(
+        path=path,
+        start=T0,
+        end=T0 + timedelta(seconds=10),
+        skipped=False,
+        media_start=T0 - timedelta(seconds=0.5),
+    )
+    params = dict(
+        camera="Street",
+        start=T0,
+        end=chunk.end,
+        output_dir=tmp_path,
+        exporter=lambda **_kwargs: [chunk],
+        load_audio=lambda *_args, **_kwargs: np.zeros(16_000 * 10 + 8_000, dtype=np.float32),
+        score_audio=lambda _w: [FrameScore(time_seconds=10.0, scores={"Engine": 0.9})],
+        progress=lambda *_args: None,
+    )
+    short = run_scan(event_config=EventConfig(min_duration_seconds=0), **params)
+    assert len(short.events) == 1
+    assert short.events[0].start == T0 + timedelta(seconds=9.5)
+    assert short.events[0].end == chunk.end
+    media = capture_events(
+        short.events, short.chunks, run_dir=tmp_path / "review", snapshot_count=3
+    )
+    assert media[0].error is None
+    assert len(media[0].snapshots) == 3
+    assert not run_scan(event_config=EventConfig(min_duration_seconds=0.75), **params).events
+
+
+def test_event_end_uses_longest_valid_overlapping_window() -> None:
+    frames = [
+        ScoreFrame(T0, {"Engine": 0.9}, end=T0 + timedelta(seconds=0.975)),
+        ScoreFrame(T0 + timedelta(seconds=0.48), {"Engine": 0.9}, end=T0 + timedelta(seconds=0.7)),
+    ]
+    events = detect_events(frames, camera="Street", config=EventConfig(min_duration_seconds=0))
+    assert events[0].end == T0 + timedelta(seconds=0.975)
+
+
 def test_one_bad_chunk_is_recorded_and_the_rest_are_scored(tmp_path: Path) -> None:
     second = T0 + timedelta(minutes=10)
     chunks = [

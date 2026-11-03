@@ -229,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run a subcommand. A scan exits 0 with or without hits."""
+    """Run a subcommand; partial scan coverage exits 3 after writing results."""
     args = build_parser().parse_args(argv)
     try:
         if args.command == "cameras":

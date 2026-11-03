@@ -35,10 +35,11 @@ class EventConfig:
 
 @dataclass(frozen=True)
 class ScoreFrame:
-    """One classifier window. `time` is the window start in UTC."""
+    """Window start in UTC, with an optional end bounding the available audio."""
 
     time: datetime
     scores: Mapping[str, float]
+    end: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -150,8 +151,8 @@ def _event_from_group(
     config: EventConfig,
 ) -> DetectionEvent | None:
     start = _as_utc(frames[indexes[0]].time)
-    # The last window still covers `window_seconds` of audio.
-    end = _as_utc(frames[indexes[-1]].time) + timedelta(seconds=config.window_seconds)
+    # A padded tail only covers the real audio, not the zero padding.
+    end = max(_frame_end(frames[index], config.window_seconds) for index in indexes)
     if (end - start).total_seconds() < config.min_duration_seconds:
         return None
     contributing = tuple(
@@ -179,6 +180,11 @@ def _event_from_group(
         mean_score=sum(peak_values) / len(peak_values),
         contributing_classes=contributing,
     )
+
+
+def _frame_end(frame: ScoreFrame, window_seconds: float) -> datetime:
+    end = _as_utc(frame.time) + timedelta(seconds=window_seconds)
+    return min(end, _as_utc(frame.end)) if frame.end is not None else end
 
 
 def _group_indexes(
